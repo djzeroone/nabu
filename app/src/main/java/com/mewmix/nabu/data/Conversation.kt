@@ -23,7 +23,9 @@ data class ConversationTurn(
     val content: String,
     val imagePath: String? = null,
     val audioPath: String? = null,
-    val audioName: String? = null
+    val audioName: String? = null,
+    val ttsAudioPath: String? = null,
+    val ttsSampleRate: Int? = null,
 )
 
 enum class ConversationRole {

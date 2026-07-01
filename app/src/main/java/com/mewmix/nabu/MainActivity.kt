@@ -41,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
@@ -88,6 +89,9 @@ import com.mewmix.nabu.utils.DebugLogger
 import com.mewmix.nabu.utils.OnnxRuntimeManager
 import com.mewmix.nabu.utils.formatBytes
 import com.mewmix.nabu.utils.UpdateChecker
+import com.mewmix.nabu.utils.AudioWorkspaceState
+import com.mewmix.nabu.utils.loadWorkspaceAudio
+import com.mewmix.nabu.utils.persistWorkspaceAudio
 import com.mewmix.nabu.kokoro.Downloader
 import com.mewmix.nabu.kokoro.RunEp
 import com.google.android.material.color.DynamicColors
@@ -201,7 +205,7 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         viewModel = viewModel,
                         phonemeConverter = phonemeConverter,
-                        onGenerateAudio = { text, style, speed, shouldSave, onComplete ->
+                        onGenerateAudio = { text, style, speed, shouldSave, onGenerated, onComplete ->
                             generateAudio(
                                 viewModel,
                                 phonemeConverter,
@@ -211,6 +215,7 @@ class MainActivity : ComponentActivity() {
                                 this@MainActivity,
                                 scope,
                                 shouldSave,
+                                onGenerated,
                                 onComplete
                             )
                         },
@@ -241,7 +246,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleStartIntent(intent: Intent?): Screen {
-        val screen = screenFromString(intent?.getStringExtra(EXTRA_START_SCREEN))
+        val requested = intent?.getStringExtra(EXTRA_START_SCREEN)
+        val screen = screenFromString(requested ?: SettingsManager.getLastMainScreen(this))
         val bookUri = intent?.getStringExtra(EXTRA_BOOK_URI)
         if (!bookUri.isNullOrBlank()) {
             SettingsManager.setLastBookUri(this, bookUri)
@@ -260,6 +266,7 @@ private fun generateAudio(
     context: Context,
     scope: CoroutineScope,
     shouldSave: Boolean,
+    onGenerated: (FloatArray, Int) -> Unit,
     onComplete: () -> Unit
 ) {
     val modelManager = com.mewmix.nabu.data.ModelManager(context)
@@ -334,12 +341,8 @@ private fun generateAudio(
                 viewModel.updateBenchmarkStat("Latency", genMs.toFloat())
             }
 
-            playAudio(
-                audioData,
-                sampleRate,
-                scope,
-                onComplete = onComplete
-            )
+            withContext(Dispatchers.Main) { onGenerated(audioData, sampleRate) }
+            playAudio(audioData, sampleRate, scope, onComplete = {})
 
             if (shouldSave) {
                 saveAudio(audioData, context, style, sampleRate)
@@ -401,13 +404,14 @@ sealed class Screen {
 fun MainScreen(
     viewModel: GlobalRuntimeViewModel,
     phonemeConverter: PhonemeConverter,
-    onGenerateAudio: (String, String, Float, Boolean, () -> Unit) -> Unit,
+    onGenerateAudio: (String, String, Float, Boolean, (FloatArray, Int) -> Unit, () -> Unit) -> Unit,
     userPreferencesRepository: UserPreferencesRepository,
     initialScreen: Screen = Screen.Basic,
     requestedScreen: Screen? = null,
     onRequestedScreenHandled: () -> Unit = {},
     onThemeChanged: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val screenStack = rememberSaveable(
         saver = listSaver(
             save = { stateList -> stateList.map(::screenToString) },
@@ -433,6 +437,7 @@ fun MainScreen(
     val navigateTo: (Screen) -> Unit = { screen ->
         if (screenStack.lastOrNull() != screen) {
             screenStack.add(screen)
+            SettingsManager.setLastMainScreen(context, screenToString(screen))
         }
     }
 
@@ -446,9 +451,9 @@ fun MainScreen(
     BackHandler(enabled = screenStack.size > 1) {
         if (screenStack.size > 1) {
             screenStack.removeAt(screenStack.lastIndex)
+            SettingsManager.setLastMainScreen(context, screenToString(screenStack.last()))
         }
     }
-    val context = LocalContext.current
     
     // Collect Global State
     val modelState by viewModel.modelState.collectAsState()
@@ -534,24 +539,35 @@ fun MainScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BasicScreen(
-    onGenerateAudio: (String, String, Float, Boolean, () -> Unit) -> Unit,
+    onGenerateAudio: (String, String, Float, Boolean, (FloatArray, Int) -> Unit, () -> Unit) -> Unit,
     modelState: ModelState
 ) {
     val context = LocalContext.current
+    val playbackScope = rememberCoroutineScope()
     val styleLoader = remember { StyleLoader(context) }
     val names = styleLoader.names.sorted()
 
-    var text by remember { mutableStateOf(SettingsManager.getBasicTtsText(context)) }
+    val initialWorkspace = remember { SettingsManager.getAudioWorkspace(context) }
+    var text by remember { mutableStateOf(initialWorkspace.text) }
     var style by remember {
         mutableStateOf(
-            SettingsManager.getStyle(context).takeIf { it in names }
+            initialWorkspace.style.takeIf { it in names }
                 ?: names.firstOrNull().orEmpty()
         )
     }
-    var speed by remember { mutableFloatStateOf(SettingsManager.getSpeed(context)) }
+    var speed by remember { mutableFloatStateOf(initialWorkspace.speed) }
     var isProcessing by remember { mutableStateOf(false) }
     var shouldSaveFile by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(false) }
+    var lastGeneratedAudio by remember { mutableStateOf(loadWorkspaceAudio(initialWorkspace.lastAudio)) }
+    var lastAudioRef by remember { mutableStateOf(initialWorkspace.lastAudio) }
+
+    fun persistWorkspace() {
+        SettingsManager.setAudioWorkspace(
+            context,
+            AudioWorkspaceState(text, style, speed, lastAudioRef)
+        )
+    }
     
     var isSupertonic by remember { mutableStateOf(SettingsManager.getTtsEngine(context) == "supertonic") }
     var isSoprano by remember { mutableStateOf(SettingsManager.getTtsEngine(context) == "soprano") }
@@ -574,19 +590,8 @@ fun BasicScreen(
         
         if (style.isEmpty() && names.isNotEmpty()) {
             style = names.first()
-            SettingsManager.setStyle(context, style)
+            persistWorkspace()
         }
-    }
-
-    LaunchedEffect(style) {
-        if (style.isNotEmpty()) {
-            SettingsManager.setStyle(context, style)
-        }
-    }
-
-    LaunchedEffect(text) {
-        kotlinx.coroutines.delay(300)
-        SettingsManager.setBasicTtsText(context, text)
     }
 
     PanelBox(
@@ -613,7 +618,10 @@ fun BasicScreen(
                 value = text,
                 minLines = 6,
                 maxLines = 14,
-                onValueChange = { text = it },
+                onValueChange = {
+                    text = it
+                    persistWorkspace()
+                },
                 label = { Text("Text to speak") },
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions.Default.copy(
@@ -652,6 +660,7 @@ fun BasicScreen(
                                 text = { Text(name.uppercase()) },
                                 onClick = {
                                     style = name
+                                    persistWorkspace()
                                     expanded = false
                                 }
                             )
@@ -665,7 +674,7 @@ fun BasicScreen(
                     value = speed,
                     onValueChange = {
                         speed = it
-                        SettingsManager.setSpeed(context, it)
+                        persistWorkspace()
                     },
                     range = 0.5f..2.0f,
                     modifier = Modifier.weight(1f)
@@ -690,9 +699,23 @@ fun BasicScreen(
                     onClick = {
                         shouldSaveFile = false
                         isProcessing = true
-                        onGenerateAudio(text, style, speed, shouldSaveFile) {
-                            isProcessing = false
-                        }
+                        onGenerateAudio(
+                            text,
+                            style,
+                            speed,
+                            shouldSaveFile,
+                            { audio, sampleRate ->
+                                lastGeneratedAudio = audio to sampleRate
+                                playbackScope.launch(Dispatchers.IO) {
+                                    val ref = persistWorkspaceAudio(context, "audio", audio, sampleRate)
+                                    withContext(Dispatchers.Main) {
+                                        lastAudioRef = ref
+                                        persistWorkspace()
+                                    }
+                                }
+                            },
+                            { isProcessing = false }
+                        )
                     },
                     enabled = playEnabled
                 )
@@ -703,12 +726,45 @@ fun BasicScreen(
                     onClick = {
                         shouldSaveFile = true
                         isProcessing = true
-                        onGenerateAudio(text, style, speed, shouldSaveFile) {
-                            isProcessing = false
-                        }
+                        onGenerateAudio(
+                            text,
+                            style,
+                            speed,
+                            shouldSaveFile,
+                            { audio, sampleRate ->
+                                lastGeneratedAudio = audio to sampleRate
+                                playbackScope.launch(Dispatchers.IO) {
+                                    val ref = persistWorkspaceAudio(context, "audio", audio, sampleRate)
+                                    withContext(Dispatchers.Main) {
+                                        lastAudioRef = ref
+                                        persistWorkspace()
+                                    }
+                                }
+                            },
+                            { isProcessing = false }
+                        )
                     },
                     enabled = playEnabled
                 )
+            }
+            lastGeneratedAudio?.let { (audio, sampleRate) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+                ) {
+                    BrutalIconButton(
+                        imageVector = Icons.Filled.Replay,
+                        contentDescription = "Replay audio",
+                        onClick = { playAudio(audio, sampleRate, playbackScope) {} },
+                        enabled = !isProcessing
+                    )
+                    BrutalIconButton(
+                        imageVector = Icons.Filled.Save,
+                        contentDescription = "Save audio again",
+                        onClick = { saveAudio(audio, context, style, sampleRate) },
+                        enabled = !isProcessing
+                    )
+                }
             }
         }
     }

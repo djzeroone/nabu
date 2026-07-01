@@ -42,6 +42,12 @@ import com.mewmix.nabu.utils.SettingsManager
 import com.mewmix.nabu.utils.StyleLoader
 import com.mewmix.nabu.utils.VoiceMixConfig
 import com.mewmix.nabu.utils.VoiceMixFavorite
+import com.mewmix.nabu.utils.ChatWorkspaceState
+import com.mewmix.nabu.utils.GeneratedAudioRef
+import com.mewmix.nabu.utils.SystemPromptProfile
+import com.mewmix.nabu.utils.SpeechPlaybackCoordinator
+import com.mewmix.nabu.utils.loadWorkspaceAudio
+import com.mewmix.nabu.utils.persistWorkspaceAudio
 import com.mewmix.nabu.utils.createAudioFromStyleVector
 import com.mewmix.nabu.utils.filterToAvailableStyles
 import com.mewmix.nabu.utils.mixStyles
@@ -72,6 +78,7 @@ import java.util.Date
 import java.io.File
 import java.util.LinkedHashSet
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class ChatContextMode(val storageValue: String) {
     LONG_CONTEXT("long_context"),
@@ -909,7 +916,8 @@ class ChatViewModel(
     private val phonemeConverter = PhonemeConverter(context)
     val styleLoader = StyleLoader(context)
     private val defaultVoice = styleLoader.names.firstOrNull() ?: "af_sky"
-    private val initialVoiceMixConfig = SettingsManager.getVoiceMixConfig(context, defaultVoice)
+    private val initialChatWorkspace = SettingsManager.getChatWorkspace(context, defaultVoice)
+    private val initialVoiceMixConfig = initialChatWorkspace.voiceMix
     private val audioPlayer: AudioPlayer = KokoroAudioPlayer(viewModelScope) { newState ->
         _playerState.value = newState
     }
@@ -1046,23 +1054,31 @@ class ChatViewModel(
     private val _interpolationMode = MutableStateFlow(initialVoiceMixConfig.interpolationMode)
     val interpolationMode = _interpolationMode.asStateFlow()
 
-    private val _speed = MutableStateFlow(SettingsManager.getSpeed(context))
+    private val _draft = MutableStateFlow(initialChatWorkspace.draft)
+    val draft = _draft.asStateFlow()
+    private val _conversationSettingsExpanded = MutableStateFlow(initialChatWorkspace.conversationSettingsExpanded)
+    val conversationSettingsExpanded = _conversationSettingsExpanded.asStateFlow()
+    private val _modelSettingsExpanded = MutableStateFlow(initialChatWorkspace.modelSettingsExpanded)
+    val modelSettingsExpanded = _modelSettingsExpanded.asStateFlow()
+
+    private val _speed = MutableStateFlow(initialChatWorkspace.speed)
     val speed = _speed.asStateFlow()
 
     private val _voiceFavorites = MutableStateFlow(SettingsManager.getVoiceMixFavorites(context))
     val voiceFavorites = _voiceFavorites.asStateFlow()
 
-    private val _systemPromptFavorites =
-        MutableStateFlow(SettingsManager.getChatSystemPromptFavorites(context))
-    val systemPromptFavorites = _systemPromptFavorites.asStateFlow()
+    private val _systemPromptProfiles = MutableStateFlow(SettingsManager.getChatSystemPromptProfiles(context))
+    val systemPromptProfiles = _systemPromptProfiles.asStateFlow()
 
-    private data class QueuedAudio(val index: Int, val audio: FloatArray, val sampleRate: Int)
+    private data class QueuedAudio(val session: Long, val index: Int, val audio: FloatArray, val sampleRate: Int)
 
     private val audioQueue = Channel<QueuedAudio>(Channel.UNLIMITED)
     private val pendingPlaybackAudio = mutableMapOf<Int, QueuedAudio>()
     private var nextPlaybackIndex = 0
     private var dropQueuedAudio = false
     private var lineIndex = 0
+    private var speechSession = 0L
+    private val chatPlaybackOwner = Any()
 
     private val ttsMutex = kotlinx.coroutines.sync.Mutex()
 
@@ -1090,16 +1106,21 @@ class ChatViewModel(
         // Launch a coroutine to play queued audio in the order they were generated
         viewModelScope.launch {
             for (item in audioQueue) {
+                if (item.session != speechSession) continue
                 pendingPlaybackAudio[item.index] = item
                 while (pendingPlaybackAudio.containsKey(nextPlaybackIndex)) {
                     val queued = pendingPlaybackAudio.remove(nextPlaybackIndex)!!
-                    if (!_ttsEnabled.value || dropQueuedAudio) {
+                    if (queued.session != speechSession || !_ttsEnabled.value || dropQueuedAudio) {
                         nextPlaybackIndex++
                         continue
                     }
                     try {
+                        val playbackToken = SpeechPlaybackCoordinator.begin(chatPlaybackOwner) {
+                            audioPlayer.stop()
+                        }
                         audioPlayer.prepare(queued.audio, queued.sampleRate)
                         audioPlayer.playBlocking()
+                        SpeechPlaybackCoordinator.finish(chatPlaybackOwner, playbackToken)
                     } catch (e: Exception) {
                         DebugLogger.log("Audio playback error: ${e.localizedMessage}")
                     }
@@ -1158,17 +1179,74 @@ class ChatViewModel(
                 }
             }
         } else {
-            dropQueuedAudio = false
+            beginSpeechSession(playbackAllowed = true)
         }
     }
 
     fun stopPlayback() {
-        dropQueuedAudio = true
-        pendingPlaybackAudio.clear()
-        drainAudioQueue()
-        audioPlayer.stop()
-        _playerState.value = PlayerState.IDLE
-        _isSynthesizing.value = false
+        beginSpeechSession(playbackAllowed = false)
+    }
+
+    fun replayResponse(index: Int) {
+        val message = _chatMessages.value.getOrNull(index) ?: return
+        if (message.isFromUser) return
+        val persisted = loadWorkspaceAudio(
+            message.ttsAudioPath?.let { path ->
+                GeneratedAudioRef(path, message.ttsSampleRate ?: return@let null)
+            }
+        )
+        if (persisted != null) {
+            beginSpeechSession(playbackAllowed = true)
+            playReplayAudio(persisted.first, persisted.second)
+            return
+        }
+        if (!_ttsEnabled.value) {
+            DebugLogger.log("Chat replay skipped: TTS is disabled and no persisted response audio exists")
+            return
+        }
+        val session = beginSpeechSession(playbackAllowed = true)
+        viewModelScope.launch {
+            _isSynthesizing.value = true
+            try {
+                val generated = synthesizeSpeech(cleanText(message.message)) ?: return@launch
+                if (session != speechSession) return@launch
+                val ref = withContext(Dispatchers.IO) {
+                    persistWorkspaceAudio(
+                        context,
+                        "chat_${_activeConversationId.value ?: 0}_$index",
+                        generated.first,
+                        generated.second
+                    )
+                }
+                if (index in conversationHistory.indices) {
+                    conversationHistory[index] = conversationHistory[index].copy(
+                        ttsAudioPath = ref.path,
+                        ttsSampleRate = ref.sampleRate
+                    )
+                    persistConversationMessages()
+                }
+                _chatMessages.value = _chatMessages.value.mapIndexed { messageIndex, item ->
+                    if (messageIndex == index) item.copy(
+                        ttsAudioPath = ref.path,
+                        ttsSampleRate = ref.sampleRate
+                    ) else item
+                }
+                playReplayAudio(generated.first, generated.second)
+            } catch (error: Exception) {
+                DebugLogger.log("Chat replay failed: ${error.message}")
+            } finally {
+                _isSynthesizing.value = false
+            }
+        }
+    }
+
+    private fun playReplayAudio(audio: FloatArray, sampleRate: Int) {
+        viewModelScope.launch {
+            val token = SpeechPlaybackCoordinator.begin(chatPlaybackOwner) { audioPlayer.stop() }
+            audioPlayer.prepare(audio, sampleRate)
+            audioPlayer.playBlocking()
+            SpeechPlaybackCoordinator.finish(chatPlaybackOwner, token)
+        }
     }
 
     fun selectConversation(conversationId: Long) {
@@ -1238,7 +1316,7 @@ class ChatViewModel(
         }
         val directToolCall = explicitToolCall ?: inferredToolCall?.takeUnless { it.toolName == "read_screen" }
 
-        dropQueuedAudio = false
+        beginSpeechSession(playbackAllowed = _ttsEnabled.value)
         _orchestration.value = null
         DebugLogger.log("ChatViewModel sendMessage: $trimmed (hasImage=${image != null}, hasAudio=${audio != null})")
         _chatMessages.value += ChatMessage(trimmed, true, image, audio)
@@ -1259,6 +1337,7 @@ class ChatViewModel(
 
         val sentenceBuilder = StringBuilder()
         var hasStreamedAudio = false
+        val responseFinalized = AtomicBoolean(false)
         _chatMessages.value += ChatMessage("...", false) // placeholder
 
         val directActionPlan = if (image == null && audio == null) {
@@ -1392,6 +1471,10 @@ class ChatViewModel(
                 speakOutput: Boolean,
                 actionTrace: ActionTrace? = null
             ) {
+                if (!responseFinalized.compareAndSet(false, true)) {
+                    DebugLogger.log("ChatViewModel ignored duplicate response finalization")
+                    return
+                }
                 viewModelScope.launch {
                     _isLoading.value = false
                     finishOrchestration("Response ready")
@@ -1722,7 +1805,15 @@ class ChatViewModel(
                     }
                 }
                 
-                ChatMessage(displayMessage, turn.role == ConversationRole.USER, image, audio, parsedActionTrace)
+                ChatMessage(
+                    displayMessage,
+                    turn.role == ConversationRole.USER,
+                    image,
+                    audio,
+                    parsedActionTrace,
+                    turn.ttsAudioPath,
+                    turn.ttsSampleRate
+                )
             }
         } else {
             _chatMessages.value = emptyList()
@@ -1731,15 +1822,22 @@ class ChatViewModel(
     }
 
     private fun clearPendingAudio() {
+        beginSpeechSession(playbackAllowed = _ttsEnabled.value)
+        _isLoading.value = false
+    }
+
+    private fun beginSpeechSession(playbackAllowed: Boolean): Long {
+        speechSession += 1
         lineIndex = 0
         nextPlaybackIndex = 0
+        dropQueuedAudio = !playbackAllowed
         pendingPlaybackAudio.clear()
-        dropQueuedAudio = false
         drainAudioQueue()
+        SpeechPlaybackCoordinator.cancel(chatPlaybackOwner)
         audioPlayer.stop()
         _playerState.value = PlayerState.IDLE
         _isSynthesizing.value = false
-        _isLoading.value = false
+        return speechSession
     }
 
     private fun setActiveModel(model: Model, persistConversation: Boolean = true) {
@@ -1831,22 +1929,40 @@ class ChatViewModel(
         SettingsManager.setChatSystemPrompt(context, newPrompt)
     }
 
-    fun saveCurrentSystemPromptFavorite() {
+    fun saveCurrentSystemPromptProfile(name: String) {
         val prompt = _systemPrompt.value.trim()
-        if (prompt.isEmpty()) return
-        val updated = (_systemPromptFavorites.value.filterNot { it.equals(prompt, ignoreCase = true) } + prompt)
-        _systemPromptFavorites.value = updated
-        SettingsManager.setChatSystemPromptFavorites(context, updated)
+        val trimmedName = name.trim()
+        if (prompt.isEmpty() || trimmedName.isEmpty()) return
+        val updated = _systemPromptProfiles.value
+            .filterNot { it.name.equals(trimmedName, ignoreCase = true) } +
+            SystemPromptProfile(trimmedName, prompt)
+        _systemPromptProfiles.value = updated
+        SettingsManager.setChatSystemPromptProfiles(context, updated)
     }
 
-    fun applySystemPromptFavorite(prompt: String) {
-        updateSystemPrompt(prompt)
+    fun applySystemPromptProfile(profile: SystemPromptProfile) {
+        updateSystemPrompt(profile.prompt)
     }
 
-    fun deleteSystemPromptFavorite(prompt: String) {
-        val updated = _systemPromptFavorites.value.filterNot { it.equals(prompt, ignoreCase = true) }
-        _systemPromptFavorites.value = updated
-        SettingsManager.setChatSystemPromptFavorites(context, updated)
+    fun deleteSystemPromptProfile(name: String) {
+        val updated = _systemPromptProfiles.value.filterNot { it.name.equals(name, ignoreCase = true) }
+        _systemPromptProfiles.value = updated
+        SettingsManager.setChatSystemPromptProfiles(context, updated)
+    }
+
+    fun updateDraft(value: String) {
+        _draft.value = value
+        persistChatWorkspace()
+    }
+
+    fun updateConversationSettingsExpanded(expanded: Boolean) {
+        _conversationSettingsExpanded.value = expanded
+        persistChatWorkspace()
+    }
+
+    fun updateModelSettingsExpanded(expanded: Boolean) {
+        _modelSettingsExpanded.value = expanded
+        persistChatWorkspace()
     }
 
     fun editMessage(index: Int, content: String) {
@@ -1854,9 +1970,18 @@ class ChatViewModel(
         val updated = content.trim()
         if (updated.isEmpty()) return
         val turn = conversationHistory[index]
-        conversationHistory[index] = turn.copy(content = updated)
+        turn.ttsAudioPath?.let { path -> runCatching { File(path).delete() } }
+        conversationHistory[index] = turn.copy(
+            content = updated,
+            ttsAudioPath = null,
+            ttsSampleRate = null
+        )
         _chatMessages.value = _chatMessages.value.mapIndexed { messageIndex, message ->
-            if (messageIndex == index) message.copy(message = updated) else message
+            if (messageIndex == index) message.copy(
+                message = updated,
+                ttsAudioPath = null,
+                ttsSampleRate = null
+            ) else message
         }
         persistConversationMessages()
     }
@@ -1875,7 +2000,9 @@ class ChatViewModel(
         val image = userTurn.imagePath?.let { path -> loadBitmapFromPath(path)?.let { LlmImageInput(it) } }
         val audio = userTurn.audioPath?.let { path -> loadAudioFromPath(path, userTurn.audioName) }
         while (conversationHistory.size > userIndex) {
-            conversationHistory.removeAt(conversationHistory.lastIndex)
+            conversationHistory.removeAt(conversationHistory.lastIndex).ttsAudioPath?.let { path ->
+                runCatching { File(path).delete() }
+            }
         }
         _chatMessages.value = _chatMessages.value.take(userIndex)
         _pendingImage.value = image
@@ -2524,79 +2651,21 @@ class ChatViewModel(
             builder.clear()
             synthesizeAndQueue(cleanText(sentence))
         }
-        if (done) {
-            dropQueuedAudio = false
-        }
     }
 
     private fun synthesizeAndQueue(text: String) {
         if (!_ttsEnabled.value || dropQueuedAudio) return
+        val session = speechSession
         val currentIndex = lineIndex++
         viewModelScope.launch {
             _isSynthesizing.value = true
             try {
-                val benchmark = SettingsManager.isBenchmark(context)
-                if (benchmark) {
-                    BenchmarkManager.handoff()
-                }
                 DebugLogger.log("Synthesizing: ${text}")
-                val audioData = withContext(Dispatchers.IO) {
-                    ttsMutex.withLock {
-                        if (!_ttsEnabled.value || dropQueuedAudio) {
-                            return@withLock null
-                        }
-                        val engine = TTSManager.getEngine(context, modelManager)
-                            ?: throw IllegalStateException("No TTS engine available")
-
-                        val ttsStart = SystemClock.elapsedRealtime()
-
-                        val realEngine = if (engine is com.mewmix.nabu.tts.BenchmarkingTTSEngine) engine.delegate else engine
-
-                        if (realEngine is KokoroEngine) {
-                            DebugLogger.log("ChatViewModel: Using KokoroEngine. Phonemizing '$text'...")
-                        } else {
-                            DebugLogger.log("ChatViewModel: Using ${realEngine.name}. Synthesizing '$text'...")
-                        }
-
-                        val (data, sampleRate) = if (realEngine is KokoroEngine) {
-                            val mixedVector = mixStyles(
-                                styleLoader,
-                                _selectedStyles.value,
-                                _weights.value,
-                                _interpolationMode.value
-                            )
-                            val phonemes = phonemeConverter.phonemize(text)
-                            DebugLogger.log("ChatViewModel: Phonemes generated: $phonemes")
-
-                            createAudioFromStyleVector(
-                                phonemes = phonemes,
-                                voice = mixedVector,
-                                speed = _speed.value,
-                                engine = realEngine
-                            )
-                        } else {
-                            // For Supertonic or other engines, use the interface directly
-                            // Note: Supertonic does its own text normalization/phonemization internally or via TextProcessor
-                            if (realEngine is DebugSupertonicEngine) {
-                                val styleName = _selectedStyles.value.firstOrNull() ?: "F1"
-                                DebugLogger.log("ChatViewModel: Setting Supertonic style to '$styleName'")
-                                realEngine.setStyle(styleName)
-                            }
-                            val result = engine.synthesize(text, _speed.value)
-                            result.wav to result.sampleRate
-                        }
-
-                        val genMs = SystemClock.elapsedRealtime() - ttsStart
-                        if (benchmark) {
-                            val audioMs = data.size * 1000L / sampleRate
-                            // Note: Benchmark might need adjustment for Supertonic details
-                            BenchmarkManager.recordTts(OnnxRuntimeManager.currentBundle(), genMs, audioMs)
-                            BenchmarkManager.profileSystem(context)
-                        }
-                        QueuedAudio(currentIndex, data, sampleRate)
-                    }
+                val generated = synthesizeSpeech(text)
+                val audioData = generated?.let { (data, sampleRate) ->
+                    QueuedAudio(session, currentIndex, data, sampleRate)
                 }
-                if (audioData != null && _ttsEnabled.value && !dropQueuedAudio) {
+                if (audioData != null && session == speechSession && _ttsEnabled.value && !dropQueuedAudio) {
                     audioQueue.send(audioData)
                 }
             } catch (e: Exception) {
@@ -2604,6 +2673,44 @@ class ChatViewModel(
             } finally {
                 _isSynthesizing.value = false
             }
+        }
+    }
+
+    private suspend fun synthesizeSpeech(text: String): Pair<FloatArray, Int>? = withContext(Dispatchers.IO) {
+        ttsMutex.withLock {
+            if (!_ttsEnabled.value || dropQueuedAudio) return@withLock null
+            val benchmark = SettingsManager.isBenchmark(context)
+            if (benchmark) BenchmarkManager.handoff()
+            val engine = TTSManager.getEngine(context, modelManager)
+                ?: throw IllegalStateException("No TTS engine available")
+            val ttsStart = SystemClock.elapsedRealtime()
+            val realEngine = if (engine is com.mewmix.nabu.tts.BenchmarkingTTSEngine) engine.delegate else engine
+            val generated = if (realEngine is KokoroEngine) {
+                val mixedVector = mixStyles(
+                    styleLoader,
+                    _selectedStyles.value,
+                    _weights.value,
+                    _interpolationMode.value
+                )
+                val phonemes = phonemeConverter.phonemize(text)
+                createAudioFromStyleVector(
+                    phonemes = phonemes,
+                    voice = mixedVector,
+                    speed = _speed.value,
+                    engine = realEngine
+                )
+            } else {
+                if (realEngine is DebugSupertonicEngine) {
+                    realEngine.setStyle(_selectedStyles.value.firstOrNull() ?: "F1")
+                }
+                engine.synthesize(text, _speed.value).let { it.wav to it.sampleRate }
+            }
+            if (benchmark) {
+                val audioMs = generated.first.size * 1000L / generated.second
+                BenchmarkManager.recordTts(OnnxRuntimeManager.currentBundle(), SystemClock.elapsedRealtime() - ttsStart, audioMs)
+                BenchmarkManager.profileSystem(context)
+            }
+            generated
         }
     }
 
@@ -2651,16 +2758,7 @@ class ChatViewModel(
 
     fun updateSpeed(newSpeed: Float) {
         _speed.value = newSpeed
-        persistSpeed(newSpeed)
-    }
-
-    private var speedPersistenceJob: kotlinx.coroutines.Job? = null
-    private fun persistSpeed(value: Float) {
-        speedPersistenceJob?.cancel()
-        speedPersistenceJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(300)
-            SettingsManager.setSpeed(context, value)
-        }
+        persistChatWorkspace()
     }
 
     fun saveCurrentFavorite(name: String) {
@@ -2711,13 +2809,20 @@ class ChatViewModel(
         }
     }
 
-    private var configPersistenceJob: kotlinx.coroutines.Job? = null
     private fun persistVoiceMixConfig() {
-        configPersistenceJob?.cancel()
-        SettingsManager.setVoiceMixConfig(context, currentVoiceMixConfig())
-        configPersistenceJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(500)
-            SettingsManager.setVoiceMixConfig(context, currentVoiceMixConfig())
-        }
+        persistChatWorkspace()
+    }
+
+    private fun persistChatWorkspace() {
+        SettingsManager.setChatWorkspace(
+            context,
+            ChatWorkspaceState(
+                draft = _draft.value,
+                voiceMix = currentVoiceMixConfig(),
+                speed = _speed.value,
+                conversationSettingsExpanded = _conversationSettingsExpanded.value,
+                modelSettingsExpanded = _modelSettingsExpanded.value
+            )
+        )
     }
 }

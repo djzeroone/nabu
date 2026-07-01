@@ -12,13 +12,61 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.min
 
+object SpeechPlaybackCoordinator {
+    private var generation = 0L
+    private var activeOwner: Any? = null
+    private var activeCancel: (() -> Unit)? = null
+
+    fun begin(owner: Any, cancel: () -> Unit): Long {
+        val previous = synchronized(this) {
+            generation += 1
+            val old = activeCancel
+            activeOwner = owner
+            activeCancel = cancel
+            old to generation
+        }
+        previous.first?.invoke()
+        return previous.second
+    }
+
+    @Synchronized
+    fun isCurrent(owner: Any, token: Long): Boolean = activeOwner === owner && generation == token
+
+    @Synchronized
+    fun finish(owner: Any, token: Long) {
+        if (activeOwner === owner && generation == token) {
+            activeOwner = null
+            activeCancel = null
+        }
+    }
+
+    fun cancel(owner: Any) {
+        val callback = synchronized(this) {
+            if (activeOwner !== owner) return
+            generation += 1
+            activeOwner = null
+            activeCancel.also { activeCancel = null }
+        }
+        callback?.invoke()
+    }
+}
+
+private val manualPlaybackOwner = Any()
+
 fun playAudio(audioData: FloatArray, sampleRate: Int, scope: CoroutineScope, onComplete: () -> Unit) {
+    var audioTrack: AudioTrack? = null
+    val token = SpeechPlaybackCoordinator.begin(manualPlaybackOwner) {
+        runCatching { audioTrack?.pause() }
+        runCatching { audioTrack?.flush() }
+        runCatching { audioTrack?.release() }
+        audioTrack = null
+    }
     scope.launch(Dispatchers.IO) {
         val channelConfig = CHANNEL_OUT_MONO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val bufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
 
-        val audioTrack = AudioTrack(
+        audioTrack = AudioTrack(
             AudioManager.STREAM_MUSIC,
             sampleRate,
             channelConfig,
@@ -37,16 +85,17 @@ fun playAudio(audioData: FloatArray, sampleRate: Int, scope: CoroutineScope, onC
             shortBuffer.put(pcmValue)
         }
 
-        audioTrack.play()
+        val track = audioTrack ?: return@launch
+        track.play()
 
         val pcmBytes = byteBuffer.array()
         val chunkSize = 4096
         var pos = 0
-        while (pos < pcmBytes.size) {
+        while (pos < pcmBytes.size && SpeechPlaybackCoordinator.isCurrent(manualPlaybackOwner, token)) {
             val remaining = pcmBytes.size - pos
             val toWrite = min(chunkSize, remaining)
             val floatStart = pos / 2
-            val written = audioTrack.write(pcmBytes, pos, toWrite)
+            val written = track.write(pcmBytes, pos, toWrite)
             if (written > 0) {
                 PcmTap.pushFloats(audioData, floatStart, written / 2)
                 pos += written
@@ -55,8 +104,10 @@ fun playAudio(audioData: FloatArray, sampleRate: Int, scope: CoroutineScope, onC
             }
         }
 
-        audioTrack.stop()
-        audioTrack.release()
+        runCatching { track.stop() }
+        runCatching { track.release() }
+        audioTrack = null
+        SpeechPlaybackCoordinator.finish(manualPlaybackOwner, token)
 
         withContext(Dispatchers.Main) {
             onComplete()

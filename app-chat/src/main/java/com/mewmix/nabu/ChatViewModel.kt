@@ -15,7 +15,9 @@ data class ChatMessage(
     val isFromUser: Boolean,
     val image: LlmImageInput? = null,
     val audio: LlmAudioInput? = null,
-    val actionTrace: ActionTrace? = null
+    val actionTrace: ActionTrace? = null,
+    val ttsAudioPath: String? = null,
+    val ttsSampleRate: Int? = null,
 )
 
 data class ActionTrace(

@@ -52,6 +52,11 @@ object SettingsManager {
     private const val KEY_CHAT_CONTEXT_MODE = "chat_context_mode"
     private const val KEY_BASIC_TTS_TEXT = "basic_tts_text"
     private const val KEY_MIXER_TEXT = "mixer_text"
+    private const val KEY_AUDIO_WORKSPACE = "audio_workspace"
+    private const val KEY_MIXER_WORKSPACE = "mixer_workspace"
+    private const val KEY_CHAT_WORKSPACE = "chat_workspace"
+    private const val KEY_CHAT_SYSTEM_PROMPT_PROFILES = "chat_system_prompt_profiles"
+    private const val KEY_LAST_MAIN_SCREEN = "last_main_screen"
     private const val KEY_OPTIONAL_PERMISSIONS_REVIEWED = "optional_permissions_reviewed"
     private const val LEGACY_MIXER_PREFS = "mixer_config"
     private const val LEGACY_MIXER_STYLES = "styles"
@@ -285,6 +290,85 @@ object SettingsManager {
         default: String = "Made with love and brought to you from outer space."
     ): String =
         DatabaseManager.getSetting(context, KEY_BASIC_TTS_TEXT) ?: default
+
+    fun setAudioWorkspace(context: Context, state: AudioWorkspaceState) {
+        DatabaseManager.setSetting(context, KEY_AUDIO_WORKSPACE, gson.toJson(state))
+    }
+
+    fun getAudioWorkspace(context: Context): AudioWorkspaceState {
+        val fallback = AudioWorkspaceState(
+            text = getBasicTtsText(context),
+            style = getStyle(context),
+            speed = getSpeed(context)
+        )
+        return DatabaseManager.getSetting(context, KEY_AUDIO_WORKSPACE)
+            ?.let { raw -> runCatching { gson.fromJson(raw, AudioWorkspaceState::class.java) }.getOrNull() }
+            ?.takeIf { it.text != null && it.style != null && it.speed.isFinite() }
+            ?: fallback.also { setAudioWorkspace(context, it) }
+    }
+
+    fun setMixerWorkspace(context: Context, state: MixerWorkspaceState) {
+        DatabaseManager.setSetting(context, KEY_MIXER_WORKSPACE, gson.toJson(state))
+    }
+
+    fun getMixerWorkspace(context: Context, defaultStyle: String = "af_sky"): MixerWorkspaceState {
+        val fallback = MixerWorkspaceState(
+            text = getMixerText(context),
+            voiceMix = getVoiceMixConfig(context, defaultStyle),
+            speed = getSpeed(context)
+        )
+        return DatabaseManager.getSetting(context, KEY_MIXER_WORKSPACE)
+            ?.let { raw -> runCatching { gson.fromJson(raw, MixerWorkspaceState::class.java) }.getOrNull() }
+            ?.takeIf { it.text != null && it.voiceMix != null && it.speed.isFinite() }
+            ?: fallback.also { setMixerWorkspace(context, it) }
+    }
+
+    fun setChatWorkspace(context: Context, state: ChatWorkspaceState) {
+        DatabaseManager.setSetting(context, KEY_CHAT_WORKSPACE, gson.toJson(state))
+    }
+
+    fun getChatWorkspace(context: Context, defaultStyle: String = "af_sky"): ChatWorkspaceState {
+        val fallback = ChatWorkspaceState(
+            voiceMix = getVoiceMixConfig(context, defaultStyle),
+            speed = getSpeed(context)
+        )
+        return DatabaseManager.getSetting(context, KEY_CHAT_WORKSPACE)
+            ?.let { raw -> runCatching { gson.fromJson(raw, ChatWorkspaceState::class.java) }.getOrNull() }
+            ?.takeIf { it.draft != null && it.voiceMix != null && it.speed.isFinite() }
+            ?: fallback.also { setChatWorkspace(context, it) }
+    }
+
+    fun setChatSystemPromptProfiles(context: Context, profiles: List<SystemPromptProfile>) {
+        val normalized = profiles.mapNotNull { profile ->
+            val name = profile.name.trim()
+            val prompt = profile.prompt.trim()
+            if (name.isEmpty() || prompt.isEmpty()) null else SystemPromptProfile(name, prompt)
+        }.distinctBy { it.name.lowercase() }
+        DatabaseManager.setSetting(context, KEY_CHAT_SYSTEM_PROMPT_PROFILES, gson.toJson(normalized))
+    }
+
+    fun getChatSystemPromptProfiles(context: Context): List<SystemPromptProfile> {
+        val raw = DatabaseManager.getSetting(context, KEY_CHAT_SYSTEM_PROMPT_PROFILES).orEmpty()
+        if (raw.isNotBlank()) {
+            val type = TypeToken.getParameterized(List::class.java, SystemPromptProfile::class.java).type
+            return runCatching { gson.fromJson<List<SystemPromptProfile>>(raw, type).orEmpty() }
+                .getOrDefault(emptyList())
+                .filter { it.name.isNotBlank() && it.prompt.isNotBlank() }
+        }
+        val migrated = getChatSystemPromptFavorites(context).mapIndexed { index, prompt ->
+            val firstLine = prompt.lineSequence().firstOrNull().orEmpty().trim().take(48)
+            SystemPromptProfile(firstLine.ifBlank { "Prompt ${index + 1}" }, prompt)
+        }
+        if (migrated.isNotEmpty()) setChatSystemPromptProfiles(context, migrated)
+        return migrated
+    }
+
+    fun setLastMainScreen(context: Context, screen: String) {
+        DatabaseManager.setSetting(context, KEY_LAST_MAIN_SCREEN, screen)
+    }
+
+    fun getLastMainScreen(context: Context, default: String = "Basic"): String =
+        DatabaseManager.getSetting(context, KEY_LAST_MAIN_SCREEN)?.ifBlank { default } ?: default
 
     fun setChatContextMode(context: Context, mode: String) {
         DatabaseManager.setSetting(context, KEY_CHAT_CONTEXT_MODE, mode.trim())

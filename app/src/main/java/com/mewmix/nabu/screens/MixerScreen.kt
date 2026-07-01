@@ -64,6 +64,7 @@ import com.mewmix.nabu.utils.filterToAvailableStyles
 import com.mewmix.nabu.ui.brutalist.BrutalButton
 import com.mewmix.nabu.ui.brutalist.BrutalIconButton
 import com.mewmix.nabu.ui.brutalist.BrutalSlider
+import com.mewmix.nabu.ui.brutalist.BrutalSection
 import com.mewmix.nabu.ui.brutalist.PanelRow
 import com.mewmix.nabu.utils.playAudio
 import com.mewmix.nabu.utils.saveAudio
@@ -76,6 +77,9 @@ import com.mewmix.nabu.soprano.SopranoEngine
 import com.mewmix.nabu.soprano.SopranoSamplingConfig
 import com.mewmix.nabu.supertonic.DebugSupertonicEngine
 import com.mewmix.nabu.ui.components.RuntimeStatusLine
+import com.mewmix.nabu.utils.MixerWorkspaceState
+import com.mewmix.nabu.utils.loadWorkspaceAudio
+import com.mewmix.nabu.utils.persistWorkspaceAudio
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -132,16 +136,17 @@ fun MixerScreen(
         }
     }
 
-    var text by remember { mutableStateOf(SettingsManager.getMixerText(context)) }
-    var speed by remember { mutableFloatStateOf(SettingsManager.getSpeed(context)) }
+    val defaultVoice = styleLoader.names.firstOrNull() ?: "af_sky"
+    val initialWorkspace = remember(defaultVoice) { SettingsManager.getMixerWorkspace(context, defaultVoice) }
+    var text by remember { mutableStateOf(initialWorkspace.text) }
+    var speed by remember { mutableFloatStateOf(initialWorkspace.speed) }
     var isProcessing by remember { mutableStateOf(false) }
     var shouldSaveFile by remember { mutableStateOf(false) }
-    var lastGeneratedAudio by remember { mutableStateOf<Pair<FloatArray, Int>?>(null) }
+    var lastGeneratedAudio by remember { mutableStateOf(loadWorkspaceAudio(initialWorkspace.lastAudio)) }
+    var lastAudioRef by remember { mutableStateOf(initialWorkspace.lastAudio) }
+    var settingsExpanded by remember { mutableStateOf(initialWorkspace.settingsExpanded) }
 
-    val defaultVoice = styleLoader.names.firstOrNull() ?: "af_sky"
-    val initial = remember(defaultVoice) {
-        SettingsManager.getVoiceMixConfig(context, defaultVoice)
-    }
+    val initial = initialWorkspace.voiceMix.filterToAvailableStyles(styleLoader.names, defaultVoice)
 
     var selectedStyles by remember { mutableStateOf(initial.styles) }
     var weights by remember { mutableStateOf(initial.weights) }
@@ -150,27 +155,23 @@ fun MixerScreen(
         mutableStateOf(SettingsManager.getVoiceMixFavorites(context))
     }
 
-    // Debounced persistence for Speed
-    LaunchedEffect(speed) {
-        if (speed != SettingsManager.getSpeed(context)) {
-            kotlinx.coroutines.delay(300)
-            SettingsManager.setSpeed(context, speed)
-        }
-    }
-
-    LaunchedEffect(text) {
-        kotlinx.coroutines.delay(300)
-        SettingsManager.setMixerText(context, text)
-    }
-
-    // Debounced persistence for Voice Mix Config
-    LaunchedEffect(selectedStyles, weights, interpolationMode) {
-        // We only persist if it's different from the saved one to avoid initial redundant write
-        // but for simplicity and since we have 300ms debounce, it's fine.
-        kotlinx.coroutines.delay(500)
-        SettingsManager.setVoiceMixConfig(
+    fun persistWorkspace(
+        workspaceText: String = text,
+        workspaceSpeed: Float = speed,
+        styles: List<String> = selectedStyles,
+        styleWeights: Map<String, Float> = weights,
+        mode: InterpolationMode = interpolationMode,
+        expanded: Boolean = settingsExpanded,
+    ) {
+        SettingsManager.setMixerWorkspace(
             context,
-            VoiceMixConfig(selectedStyles, weights, interpolationMode)
+            MixerWorkspaceState(
+                text = workspaceText,
+                voiceMix = VoiceMixConfig(styles, styleWeights, mode),
+                speed = workspaceSpeed,
+                settingsExpanded = expanded,
+                lastAudio = lastAudioRef
+            )
         )
     }
 
@@ -179,10 +180,7 @@ fun MixerScreen(
         styleWeights: Map<String, Float> = weights,
         mode: InterpolationMode = interpolationMode,
     ) {
-        SettingsManager.setVoiceMixConfig(
-            context,
-            VoiceMixConfig(styles, styleWeights, mode)
-        )
+        persistWorkspace(styles = styles, styleWeights = styleWeights, mode = mode)
     }
 
     fun persistFavorites(updated: List<VoiceMixFavorite>) {
@@ -220,7 +218,16 @@ fun MixerScreen(
                 scope,
                 context,
                 selectedStyles.firstOrNull(),
-                onGenerated = { audio, sampleRate -> lastGeneratedAudio = audio to sampleRate }
+                onGenerated = { audio, sampleRate ->
+                    lastGeneratedAudio = audio to sampleRate
+                    scope.launch(Dispatchers.IO) {
+                        val ref = persistWorkspaceAudio(context, "mixer", audio, sampleRate)
+                        withContext(Dispatchers.Main) {
+                            lastAudioRef = ref
+                            persistWorkspace()
+                        }
+                    }
+                }
             ) {
                 isProcessing = false
             }
@@ -291,7 +298,10 @@ fun MixerScreen(
 
             TextField(
                 value = text,
-                onValueChange = { text = it },
+                onValueChange = {
+                    text = it
+                    persistWorkspace(workspaceText = it)
+                },
                 minLines = 5,
                 maxLines = 12,
                 label = { Text("Text to speak") },
@@ -343,10 +353,22 @@ fun MixerScreen(
                 }
             }
 
+        BrutalSection(
+            title = "Mixer Settings",
+            expanded = settingsExpanded,
+            onToggle = {
+                settingsExpanded = !settingsExpanded
+                persistWorkspace(expanded = settingsExpanded)
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
         PanelRow(name = "Speed") {
             BrutalSlider(
                 value = speed,
-                onValueChange = { speed = it },
+                onValueChange = {
+                    speed = it
+                    persistWorkspace(workspaceSpeed = it)
+                },
                 range = 0.5f..2.0f,
                 modifier = Modifier.weight(1f)
             )
@@ -519,6 +541,7 @@ fun MixerScreen(
                 )
                 Text("%.2f".format(sopranoRepPenalty))
             }
+        }
         }
 
         // Debug logs moved to dedicated screen

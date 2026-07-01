@@ -111,6 +111,9 @@ fun ChatScreen(
     val isSynthesizing by viewModel.isSynthesizing.collectAsState()
     val playerState by viewModel.playerState.collectAsState()
     val ttsEnabled by viewModel.ttsEnabled.collectAsState()
+    val persistedDraft by viewModel.draft.collectAsState()
+    val showConversationSettings by viewModel.conversationSettingsExpanded.collectAsState()
+    val showMixerSettings by viewModel.modelSettingsExpanded.collectAsState()
     val conversationSummaries by viewModel.conversationSummaries.collectAsState()
     val activeConversationId by viewModel.activeConversationId.collectAsState()
     val availableModels by viewModel.availableModels.collectAsState()
@@ -129,7 +132,7 @@ fun ChatScreen(
     val voiceRecorder = remember { VoiceAttachmentRecorder(context.applicationContext) }
     var isRecordingVoice by remember { mutableStateOf(false) }
     var startVoiceHandled by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf(initialMessage) }
+    var message by remember { mutableStateOf(initialMessage.ifBlank { persistedDraft }) }
     var attachmentMenuExpanded by remember { mutableStateOf(false) }
     var actionTraceToShow by remember { mutableStateOf<ActionTrace?>(null) }
 
@@ -249,8 +252,6 @@ fun ChatScreen(
     val voiceFavorites by viewModel.voiceFavorites.collectAsState()
 
     val listState = rememberLazyListState()
-    var showMixerSettings by remember { mutableStateOf(false) }
-    var showConversationSettings by remember { mutableStateOf(false) }
     var conversationMenuExpanded by remember { mutableStateOf(false) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<Long?>(null) }
@@ -422,7 +423,7 @@ fun ChatScreen(
             BrutalSection(
                 title = "Conversation Settings",
                 expanded = showConversationSettings,
-                onToggle = { showConversationSettings = !showConversationSettings },
+                onToggle = { viewModel.updateConversationSettingsExpanded(!showConversationSettings) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(8.dp)
@@ -587,15 +588,16 @@ fun ChatScreen(
 
             BrutalSection(
                 title = "Model Settings",
-                expanded = showMixerSettings, // Reusing mixer settings state for now, or rename it
-                onToggle = { showMixerSettings = !showMixerSettings },
+                expanded = showMixerSettings,
+                onToggle = { viewModel.updateModelSettingsExpanded(!showMixerSettings) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(8.dp)
             ) {
                 val systemPrompt by viewModel.systemPrompt.collectAsState()
-                val systemPromptFavorites by viewModel.systemPromptFavorites.collectAsState()
+                val systemPromptProfiles by viewModel.systemPromptProfiles.collectAsState()
                 val tokenUsage by viewModel.tokenUsage.collectAsState()
+                var promptProfileName by remember { mutableStateOf("") }
                 
                 Spacer(modifier = Modifier.height(8.dp))
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
@@ -622,37 +624,46 @@ fun ChatScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        BrutalButton(
-                            onClick = { viewModel.saveCurrentSystemPromptFavorite() },
+                        TextField(
+                            value = promptProfileName,
+                            onValueChange = { promptProfileName = it },
+                            label = { Text("Profile name") },
                             modifier = Modifier.weight(1f),
-                            enabled = systemPrompt.isNotBlank()
+                            singleLine = true
+                        )
+                        BrutalButton(
+                            onClick = {
+                                viewModel.saveCurrentSystemPromptProfile(promptProfileName)
+                                promptProfileName = ""
+                            },
+                            enabled = systemPrompt.isNotBlank() && promptProfileName.isNotBlank()
                         ) {
-                            Text("Save Prompt", color = MaterialTheme.colorScheme.onSurface)
+                            Text("Save", color = MaterialTheme.colorScheme.onSurface)
                         }
                     }
-                    if (systemPromptFavorites.isNotEmpty()) {
+                    if (systemPromptProfiles.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = "Prompt Favorites",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
-                        systemPromptFavorites.forEach { prompt ->
+                        systemPromptProfiles.forEach { profile ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = prompt.lineSequence().firstOrNull().orEmpty().take(42),
+                                    text = profile.name,
                                     modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                BrutalButton(onClick = { viewModel.applySystemPromptFavorite(prompt) }) {
+                                BrutalButton(onClick = { viewModel.applySystemPromptProfile(profile) }) {
                                     Text("Load", color = MaterialTheme.colorScheme.onSurface)
                                 }
-                                BrutalButton(onClick = { viewModel.deleteSystemPromptFavorite(prompt) }) {
+                                BrutalButton(onClick = { viewModel.deleteSystemPromptProfile(profile.name) }) {
                                     Text("Delete", color = MaterialTheme.colorScheme.error)
                                 }
                             }
@@ -847,6 +858,15 @@ fun ChatScreen(
                             enabled = !isLoading && !isSynthesizing,
                             size = 48.dp
                         )
+                        if (!chatMessage.isFromUser) {
+                            BrutalIconButton(
+                                imageVector = Icons.Filled.VolumeUp,
+                                contentDescription = "Replay response",
+                                onClick = { viewModel.replayResponse(index) },
+                                enabled = !isLoading && !isSynthesizing,
+                                size = 48.dp
+                            )
+                        }
                         if (!chatMessage.isFromUser && chatMessage.actionTrace != null) {
                             BrutalIconButton(
                                 imageVector = Icons.Filled.Description,
@@ -937,7 +957,10 @@ fun ChatScreen(
             ) {
                 TextField(
                     value = message,
-                    onValueChange = { message = it },
+                    onValueChange = {
+                        message = it
+                        viewModel.updateDraft(it)
+                    },
                     modifier = Modifier
                         .weight(1f)
                         .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(24.dp)),
@@ -1002,6 +1025,7 @@ fun ChatScreen(
                                                 viewModel.setPendingAudio(audio)
                                                 if (message.isBlank()) {
                                                     message = "Please process this voice recording."
+                                                    viewModel.updateDraft(message)
                                                 }
                                             } else {
                                                 Toast.makeText(context, "No voice recording captured.", Toast.LENGTH_SHORT).show()
@@ -1062,6 +1086,7 @@ fun ChatScreen(
                                 }
                                 viewModel.sendMessage(outgoing)
                                 message = ""
+                                viewModel.updateDraft("")
                             }
                         },
                     enabled = (message.isNotBlank() || pendingImage != null || pendingAudio != null) &&
