@@ -129,7 +129,6 @@ fun MixerScreen(
             val result = withContext(Dispatchers.IO) {
                 OnnxRuntimeManager.initialize(
                     context.applicationContext,
-                    allowDownload = SettingsManager.isKokoroAutoDownloadEnabled(context)
                 )
             }
             result.onFailure { DebugLogger.log("Mixer failed to init runtime: ${it.message}") }
@@ -790,7 +789,8 @@ fun WeightSliders(
 
         selectedStyles.forEach { style ->
             PanelRow(name = style) {
-                val currentWeight = (weights[style] ?: 0f).coerceIn(0f, 1f)
+                val weight = (weights[style] as Any?) as? Number
+                val currentWeight = (weight?.toFloat() ?: 0f).coerceIn(0f, 1f)
                 key(style, currentWeight) {
                     var input by remember { mutableStateOf(formatWeightInput(currentWeight)) }
                     BrutalSlider(

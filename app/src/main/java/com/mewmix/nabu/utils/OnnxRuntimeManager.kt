@@ -34,14 +34,12 @@ object OnnxRuntimeManager {
     suspend fun initialize(
         context: Context,
         preferred: RunEp? = null,
-        allowDownload: Boolean? = null,
         onProgress: (Downloader.DownloadProgress) -> Unit = {}
     ): Result<KokoroBundle> =
         mutex.withLock {
             val appContext = context.applicationContext
             manifest = ManifestProvider.kokoroV1()
             val choice = preferred ?: SettingsManager.getRuntimePreference(appContext)
-            val downloadEnabled = allowDownload ?: SettingsManager.isKokoroAutoDownloadEnabled(appContext)
 
             val currentBundle = bundle
             val currentStatus = status
@@ -49,13 +47,7 @@ object OnnxRuntimeManager {
                 return@withLock Result.success(currentBundle)
             }
 
-            if (downloadEnabled) {
-                val fetchResult = Downloader.ensureModels(appContext, manifest, onProgress)
-                if (fetchResult.isFailure) {
-                    Log.w(TAG, "Failed to download Kokoro models", fetchResult.exceptionOrNull())
-                    ensureBundledFallback(appContext, manifest)
-                }
-            } else if (!Downloader.modelsAvailable(appContext, manifest)) {
+            if (!Downloader.modelsAvailable(appContext, manifest)) {
                 ensureBundledFallback(appContext, manifest)
                 if (!Downloader.modelsAvailable(appContext, manifest)) {
                     return@withLock Result.failure(

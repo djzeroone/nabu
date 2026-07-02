@@ -20,7 +20,8 @@ fun VoiceMixConfig.normalized(defaultStyle: String): VoiceMixConfig {
         .distinct()
         .ifEmpty { listOf(defaultStyle) }
     val normalizedWeights = normalizedStyles.associateWith { style ->
-        (weights[style] ?: 1f).coerceIn(0f, 1f)
+        val weight = (weights[style] as Any?) as? Number
+        (weight?.toFloat() ?: 1f).coerceIn(0f, 1f)
     }
     return copy(styles = normalizedStyles, weights = normalizedWeights)
 }
@@ -39,7 +40,8 @@ fun VoiceMixConfig.filterToAvailableStyles(
         .distinct()
         .ifEmpty { listOf(fallbackStyle) }
     val filteredWeights = filteredStyles.associateWith { style ->
-        (weights[style] ?: 1f).coerceIn(0f, 1f)
+        val weight = (weights[style] as Any?) as? Number
+        (weight?.toFloat() ?: 1f).coerceIn(0f, 1f)
     }
     return copy(styles = filteredStyles, weights = filteredWeights)
 }

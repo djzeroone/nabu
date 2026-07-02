@@ -25,6 +25,8 @@ object TtsModelValidator {
 
     fun requiredFiles(modelId: String): List<String> {
         return when (modelId) {
+            "kokoro-fp16" -> listOf("model_fp16.onnx")
+            "kokoro-int8" -> listOf("model_int8.onnx")
             SOPRANO_MODEL_ID -> listOf(
                 "soprano_backbone_kv.onnx",
                 "soprano_decoder.onnx",
@@ -81,6 +83,8 @@ object TtsModelValidator {
         if (size <= 0L) return false
 
         val minBytes = when (modelId) {
+            "kokoro-fp16" -> 300_000_000L
+            "kokoro-int8" -> 80_000_000L
             SOPRANO_MODEL_ID -> sopranoMinBytes[localPath]
             SUPERTONIC2_MODEL_ID, SUPERTONIC3_MODEL_ID -> when {
                 localPath in supertonicBaseFiles -> 1_000L

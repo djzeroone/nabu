@@ -19,7 +19,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
-fun selectLiteRtLmBackendForModel(context: Context, path: String): Backend {
+fun selectLiteRtLmBackendForModel(context: Context, path: String, preferredBackend: String? = null): Backend {
     val normalized = path.lowercase()
     val nativeLibDir = context.applicationInfo.nativeLibraryDir
     DebugLogger.log("LiteRtLmBackend selectBackend: path=$path nativeLibDir=$nativeLibDir")
@@ -30,28 +30,38 @@ fun selectLiteRtLmBackendForModel(context: Context, path: String): Backend {
         DebugLogger.log("LiteRtLmBackend selecting NPU backend with nativeLibDir=$nativeLibDir")
         Backend.NPU(nativeLibDir)
     } else {
-        DebugLogger.log("LiteRtLmBackend selecting CPU backend")
-        Backend.CPU()
+        when (preferredBackend?.lowercase()) {
+            "gpu" -> {
+                DebugLogger.log("LiteRtLmBackend selecting GPU backend explicitly")
+                Backend.GPU()
+            }
+            else -> {
+                DebugLogger.log("LiteRtLmBackend selecting CPU backend explicitly or default")
+                Backend.CPU()
+            }
+        }
     }
 }
 
 fun probeLiteRtLmModelCompatibility(
     context: Context,
     modelId: String,
-    modelPath: String
+    modelPath: String,
+    preferredBackend: String? = null
 ): LiteRtLmModelCompatibility.Result {
     return LiteRtLmModelCompatibility.probeAll(
         context = context,
         modelId = modelId,
         modelPath = modelPath,
-        backend = selectLiteRtLmBackendForModel(context, modelPath)
+        backend = selectLiteRtLmBackendForModel(context, modelPath, preferredBackend)
     )
 }
 
 class LiteRtLmBackend(
     private val context: Context,
     private val modelId: String,
-    private val modelPath: String
+    private val modelPath: String,
+    private val preferredBackend: String? = null
 ) : LlmBackend {
     private val initialized = AtomicBoolean(false)
     private val activeConversation = AtomicReference<Conversation?>(null)
@@ -84,7 +94,7 @@ class LiteRtLmBackend(
             if (initialized.get()) return
             DebugLogger.log("LiteRtLmBackend initialize with model $modelId at $modelPath")
             initializationError.set(null)
-            val baseBackend = selectLiteRtLmBackendForModel(context, modelPath)
+            val baseBackend = selectLiteRtLmBackendForModel(context, modelPath, preferredBackend)
             val resolvedCompatibility = LiteRtLmModelCompatibility.cachedOrStatic(
                 context = context,
                 modelId = modelId,

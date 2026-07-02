@@ -150,7 +150,6 @@ fun SettingsScreen(
                 OnnxRuntimeManager.initialize(
                     context.applicationContext,
                     runtime,
-                    allowDownload = SettingsManager.isKokoroAutoDownloadEnabled(context)
                 )
             }
         }

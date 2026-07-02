@@ -165,6 +165,7 @@ class MainActivity : ComponentActivity() {
         // Logger initialized in Application
         enableEdgeToEdge()
         userPreferencesRepository = UserPreferencesRepository(this)
+        com.mewmix.nabu.utils.MigrationUtils.migrateLegacyKokoro(this)
 
         val startScreen = handleStartIntent(intent)
         if (savedInstanceState == null) {

@@ -57,17 +57,6 @@ class ModelDownloader(
         }
     }
 
-    suspend fun ensureKokoroDefaultDownloaded(): Boolean {
-        if (!tryAcquireDownload(KOKORO_MODEL_ID)) {
-            waitForActiveDownload(KOKORO_MODEL_ID)
-            return Downloader.modelsAvailable(context.applicationContext, ManifestProvider.kokoroV1())
-        }
-        return try {
-            downloadKokoro()
-        } finally {
-            releaseDownload(KOKORO_MODEL_ID)
-        }
-    }
 
     suspend fun ensureModelDownloaded(model: Model): Boolean {
         if (!tryAcquireDownload(model.id)) {
@@ -86,11 +75,6 @@ class ModelDownloader(
         }
     }
 
-    fun downloadKokoroDefault() {
-        scope.launch {
-            ensureKokoroDefaultDownloaded()
-        }
-    }
 
     fun downloadModel(model: Model) {
         scope.launch {
@@ -98,18 +82,24 @@ class ModelDownloader(
         }
     }
 
-    private suspend fun downloadKokoro(): Boolean {
+
+
+    private suspend fun downloadKokoroManifest(model: Model): Boolean {
         val appContext = context.applicationContext
-        val manifest = ManifestProvider.kokoroV1()
+        val manifest = if (model.id == "kokoro-fp16") {
+            ManifestProvider.kokoroFp16()
+        } else {
+            ManifestProvider.kokoroInt8()
+        }
 
         updateProgress(
-            modelId = KOKORO_MODEL_ID,
+            modelId = model.id,
             currentFile = "kokoro",
             downloadedBytes = 0L,
             totalBytes = manifest.files.sumOf { it.sizeBytes },
             fraction = 0f
         )
-        DebugLogger.log("ModelDownloader: Starting download of Kokoro")
+        DebugLogger.log("ModelDownloader: Starting download of Kokoro model ${model.id}")
         try {
             val result = Downloader.ensureModels(appContext, manifest) { current ->
                 val fraction = if (current.totalBytes > 0L) {
@@ -118,7 +108,7 @@ class ModelDownloader(
                     0f
                 }
                 updateProgress(
-                    modelId = KOKORO_MODEL_ID,
+                    modelId = model.id,
                     currentFile = current.fileId,
                     downloadedBytes = current.downloadedBytes,
                     totalBytes = current.totalBytes,
@@ -126,17 +116,22 @@ class ModelDownloader(
                 )
             }
             result.getOrThrow()
-            DebugLogger.log("ModelDownloader: Kokoro models verified and ready")
+            DebugLogger.log("ModelDownloader: Kokoro model ${model.id} verified and ready")
             return true
         } catch (e: Exception) {
-            DebugLogger.log("ModelDownloader: Error downloading Kokoro: ${e.message}")
+            DebugLogger.log("ModelDownloader: Error downloading Kokoro model ${model.id}: ${e.message}")
             return false
         } finally {
-            clearProgress(KOKORO_MODEL_ID)
+            clearProgress(model.id)
         }
     }
 
     private suspend fun downloadTtsModel(model: Model) {
+        if (model.id == "kokoro-fp16" || model.id == "kokoro-int8") {
+            downloadKokoroManifest(model)
+            return
+        }
+
         val modelDir = File(context.filesDir, "models")
         if (!modelDir.exists()) modelDir.mkdirs()
 

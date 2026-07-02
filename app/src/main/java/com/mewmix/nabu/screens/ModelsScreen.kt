@@ -76,33 +76,7 @@ fun ModelsScreen(
     var hfToken by remember { mutableStateOf("") }
     var hadActiveDownloads by remember { mutableStateOf(false) }
 
-    // Kokoro specific state
-    var kokoroDownloaded by remember { mutableStateOf(false) }
-    var kokoroDownloading by remember { mutableStateOf(false) }
-    val kokoroProgress = progressMap[ModelDownloader.KOKORO_MODEL_ID]
-    val kokoroDetail = detailedProgressMap[ModelDownloader.KOKORO_MODEL_ID]
-
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            kokoroDownloaded = com.mewmix.nabu.kokoro.Downloader.modelsAvailable(
-                context.applicationContext,
-                com.mewmix.nabu.kokoro.ManifestProvider.kokoroV1()
-            )
-        }
-    }
-
     LaunchedEffect(progressMap) {
-        if (kokoroDownloading && !progressMap.containsKey(ModelDownloader.KOKORO_MODEL_ID)) {
-            val available = withContext(Dispatchers.IO) {
-                com.mewmix.nabu.kokoro.Downloader.modelsAvailable(
-                    context.applicationContext,
-                    com.mewmix.nabu.kokoro.ManifestProvider.kokoroV1()
-                )
-            }
-            kokoroDownloaded = available
-            kokoroDownloading = false
-        }
-
         val hasActiveDownloads = progressMap.isNotEmpty()
         if (hadActiveDownloads && !hasActiveDownloads) {
             onModelArtifactsChanged()
@@ -211,69 +185,7 @@ fun ModelsScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                // Kokoro entry
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f), RoundedCornerShape(22.dp))
-                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f), RoundedCornerShape(22.dp))
-                            .padding(14.dp)
-                    ) {
-                        Text(text = "Kokoro (Default)", style = MaterialTheme.typography.titleMedium)
-                        Text(text = "The default text-to-speech engine.", style = MaterialTheme.typography.bodyMedium)
-                        Spacer(modifier = Modifier.height(8.dp))
 
-                        if (kokoroProgress != null) {
-                            LinearProgressIndicator(
-                                progress = { kokoroProgress.coerceIn(0f, 1f) },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            kokoroDetail?.let { detail ->
-                                val bytesLabel = if (detail.totalBytes > 0L) {
-                                    "${formatBytes(detail.downloadedBytes)} / ${formatBytes(detail.totalBytes)}"
-                                } else {
-                                    formatBytes(detail.downloadedBytes)
-                                }
-                                Text(
-                                    "${detail.currentFile}: $bytesLabel",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                if (kokoroDownloaded) {
-                                    Icon(
-                                        imageVector = Icons.Filled.CheckCircle,
-                                        contentDescription = "Downloaded",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                    BrutalButton(onClick = {
-                                         // Deleting Kokoro logic if needed, but for now we just show downloaded
-                                    }, enabled = false) { // Disabled delete for safety/simplicity as per request just to add it
-                                        Icon(Icons.Filled.Delete, contentDescription = "Delete model")
-                                    }
-                                } else {
-                                    BrutalButton(onClick = {
-                                        kokoroDownloading = true
-                                        DebugLogger.log("ModelsScreen: Starting Kokoro download")
-                                        modelDownloader.downloadKokoroDefault()
-                                    }, enabled = !kokoroDownloading) {
-                                        Icon(
-                                            Icons.Filled.CloudDownload,
-                                            contentDescription = "Download model",
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
 
                 items(models) { model ->
                     Column(

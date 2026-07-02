@@ -79,7 +79,6 @@ class ChatActivity : ComponentActivity() {
             if (SettingsManager.getTtsEngine(applicationContext) == "kokoro") {
                 val initResult = OnnxRuntimeManager.initialize(
                     applicationContext,
-                    allowDownload = SettingsManager.isKokoroAutoDownloadEnabled(applicationContext)
                 )
                 if (initResult.isFailure) {
                     val message = initResult.exceptionOrNull()?.message ?: "Kokoro runtime unavailable"

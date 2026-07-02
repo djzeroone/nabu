@@ -54,38 +54,19 @@ fun InitScreen(
     var engine by remember { mutableStateOf(SettingsManager.getTtsEngine(context)) }
     var engineExpanded by remember { mutableStateOf(false) }
     var modelExpanded by remember { mutableStateOf(false) }
-    var kokoroDownloading by remember { mutableStateOf(false) }
-    var kokoroDownloaded by remember { mutableStateOf(false) }
+
     var downloadTargetId by remember { mutableStateOf<String?>(null) }
 
     val modelManager = remember { ModelManager(context) }
     val modelDownloader = remember { ModelDownloader(context, userPreferencesRepository) }
     val progressMap by modelDownloader.progress.collectAsState()
     val detailedProgressMap by modelDownloader.detailedProgress.collectAsState()
-    val kokoroProgress = progressMap[ModelDownloader.KOKORO_MODEL_ID]
-    val kokoroDetail = detailedProgressMap[ModelDownloader.KOKORO_MODEL_ID]
+
     val ttsModels = modelManager.models.filter { it.type == ModelType.TTS }
     val supertonicModels = ttsModels.filter { it.id.startsWith("supertonic") }
     var selectedModel by remember { mutableStateOf<Model?>(supertonicModels.firstOrNull()) }
 
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            kokoroDownloaded = Downloader.modelsAvailable(context.applicationContext, ManifestProvider.kokoroV1())
-        }
-    }
-    LaunchedEffect(progressMap) {
-        if (kokoroDownloading && !progressMap.containsKey(ModelDownloader.KOKORO_MODEL_ID)) {
-            val available = withContext(Dispatchers.IO) {
-                Downloader.modelsAvailable(context.applicationContext, ManifestProvider.kokoroV1())
-            }
-            kokoroDownloaded = available
-            kokoroDownloading = false
-            if (!available) {
-                Toast.makeText(context, "Failed to download Kokoro models", Toast.LENGTH_LONG).show()
-            }
-        }
-
-        val targetId = downloadTargetId
+    LaunchedEffect(progressMap) {        val targetId = downloadTargetId
         if (targetId != null && !progressMap.containsKey(targetId)) {
             val completedModel = modelManager.models.firstOrNull { it.id == targetId }
             val completed = completedModel?.isDownloaded == true
@@ -181,51 +162,6 @@ fun InitScreen(
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column {
-                    Text(
-                        text = "Kokoro (Default)",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "The default text-to-speech engine.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    if (kokoroProgress != null) {
-                        LinearProgressIndicator(
-                            progress = { kokoroProgress.coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        kokoroDetail?.let { detail ->
-                            val bytesLabel = if (detail.totalBytes > 0L) {
-                                "${formatBytes(detail.downloadedBytes)} / ${formatBytes(detail.totalBytes)}"
-                            } else {
-                                formatBytes(detail.downloadedBytes)
-                            }
-                            Text(
-                                "${detail.currentFile}: $bytesLabel",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    } else {
-                        val kokoroButtonLabel = if (kokoroDownloaded) "Downloaded" else "Download"
-                        BrutalButton(
-                            onClick = {
-                                if (!kokoroDownloaded) {
-                                    kokoroDownloading = true
-                                    DebugLogger.log("InitScreen: Starting Kokoro download")
-                                    modelDownloader.downloadKokoroDefault()
-                                }
-                            },
-                            enabled = !kokoroDownloaded 
-                        ) {
-                            BrutalButtonText(kokoroButtonLabel)
-                        }
-                    }
-                }
-
                 ttsModels.forEach { model ->
                     Column {
                         Text(

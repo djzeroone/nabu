@@ -39,6 +39,22 @@
     "gated": false,
     "type": "LLM"
   },
+  "kokoro-fp16": {
+    "name": "Kokoro 82M FP16",
+    "description": "Kokoro 82M TTS model (FP16-enabled graph; NNAPI preferred)",
+    "repo": "onnx-community/Kokoro-82M-v1.0-ONNX",
+    "downloadUrl": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx?download=true",
+    "gated": false,
+    "type": "TTS"
+  },
+  "kokoro-int8": {
+    "name": "Kokoro 82M INT8",
+    "description": "Kokoro 82M TTS model (CPU fallback; INT8 graph)",
+    "repo": "thewh1teagle/kokoro-onnx",
+    "downloadUrl": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+    "gated": false,
+    "type": "TTS"
+  },
   "supertonic-2-onnx": {
     "name": "Supertonic 2 TTS",
     "description": "Supertonic 2 text-to-speech model",

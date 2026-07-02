@@ -104,7 +104,7 @@ object Downloader {
 
     fun modelsAvailable(ctx: Context, manifest: Manifest): Boolean {
         val root = File(ctx.filesDir, "")
-        return manifest.files.all { file ->
+        return manifest.files.any { file ->
             val outFile = File(root, file.dest)
             outFile.exists()
         }

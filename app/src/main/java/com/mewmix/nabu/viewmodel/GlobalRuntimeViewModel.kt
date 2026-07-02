@@ -87,23 +87,21 @@ class GlobalRuntimeViewModel(application: Application) : AndroidViewModel(applic
                     return@launch
                 }
                 else -> {
-                    val canAutoDownload = SettingsManager.isKokoroAutoDownloadEnabled(context)
                     val result = OnnxRuntimeManager.initialize(
                         context,
-                        allowDownload = canAutoDownload,
                         onProgress = { progress -> _downloadProgress.value = progress }
                     )
                     _modelState.value = if (result.isSuccess) {
                         ModelState.Ready
                     } else {
-                        val noModelsAvailable = !canAutoDownload &&
-                            !Downloader.modelsAvailable(context, OnnxRuntimeManager.currentManifest())
+                        val noModelsAvailable = !Downloader.modelsAvailable(context, OnnxRuntimeManager.currentManifest())
                         if (noModelsAvailable) {
-                            ModelState.Error("Voice models required")
+                            ModelState.Error("Kokoro models are not downloaded. Please download them from Settings -> Models.")
                         } else {
-                            ModelState.Error(result.exceptionOrNull()?.message ?: "Runtime init failed")
+                            ModelState.Error(result.exceptionOrNull()?.message ?: "Initialization failed")
                         }
                     }
+                    _downloadProgress.value = null
                 }
             }
         }

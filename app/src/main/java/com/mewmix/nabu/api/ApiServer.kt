@@ -414,7 +414,8 @@ class ApiServer(
             val result = probeLiteRtLmModelCompatibility(
                 context = context,
                 modelId = modelId,
-                modelPath = artifact.file.absolutePath
+                modelPath = artifact.file.absolutePath,
+                preferredBackend = SettingsManager.getMediaPipeBackend(context)
             )
             call.respondText(
                 text = JSONObject()
@@ -1133,7 +1134,8 @@ class ApiServer(
                 "litertlm" -> LiteRtLmBackend(
                     context = context,
                     modelId = targetModel.id,
-                    modelPath = artifact.file.absolutePath
+                    modelPath = artifact.file.absolutePath,
+                    preferredBackend = SettingsManager.getMediaPipeBackend(context)
                 )
                 else -> MediaPipeBackend(
                     context = context,

@@ -56,10 +56,12 @@ object LlmBackendFactory {
                 }
             }
             "litertlm" -> {
+                val preferredBackend = SettingsManager.getMediaPipeBackend(appContext)
                 LiteRtLmBackend(
                     context = appContext,
                     modelId = model.id,
-                    modelPath = artifact.file.absolutePath
+                    modelPath = artifact.file.absolutePath,
+                    preferredBackend = preferredBackend
                 ).also { it.initialize() }
             }
             else -> {
