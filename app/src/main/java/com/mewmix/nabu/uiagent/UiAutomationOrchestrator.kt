@@ -12,7 +12,9 @@ import com.mewmix.nabu.tools.GlaiveBridge
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
@@ -38,7 +40,9 @@ class UiAutomationOrchestrator(
         return try {
             runWithCleanup(goal)
         } finally {
-            cleanupArtifacts(pendingArtifactPaths.toList())
+            withContext(NonCancellable) {
+                cleanupArtifacts(pendingArtifactPaths.toList())
+            }
         }
     }
 
