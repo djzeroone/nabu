@@ -25,7 +25,8 @@ sealed interface UiActionStep {
 
 data class UiTarget(
     val elementId: String?,
-    val fallbackBounds: UiBounds?
+    val fallbackBounds: UiBounds?,
+    val textContains: String? = null
 )
 
 enum class ScrollDirection { UP, DOWN, LEFT, RIGHT }
@@ -97,7 +98,15 @@ object UiActionPlanParser {
         if (action in TARGET_ACTIONS && !step.has("target")) {
             val target = JsonObject()
             step.remove("element_id")?.let { target.add("element_id", it) }
+            if (!target.has("element_id")) {
+                step.remove("selector_id")?.let { target.add("element_id", it) }
+            }
+            if (!target.has("element_id")) {
+                step.remove("target_id")?.let { target.add("element_id", it) }
+            }
             step.remove("fallback_bounds")?.let { target.add("fallback_bounds", it) }
+            step.remove("text_contains")?.let { target.add("text_contains", it) }
+            step.remove("label")?.let { target.add("text_contains", it) }
             if (target.size() > 0) step.add("target", target)
         }
         if (action == "assert" && !step.has("condition")) {
@@ -123,6 +132,10 @@ object UiActionPlanParser {
         if (candidates.size > 1) {
             val hasTarget = step?.has("target") == true ||
                 step?.has("element_id") == true ||
+                step?.has("selector_id") == true ||
+                step?.has("target_id") == true ||
+                step?.has("text_contains") == true ||
+                step?.has("label") == true ||
                 step?.has("fallback_bounds") == true
             val shapeMatches = candidates.filter { candidate ->
                 if (hasTarget) candidate in TARGET_ACTIONS else candidate !in TARGET_ACTIONS
@@ -150,9 +163,12 @@ object UiActionPlanParser {
     private fun parseTarget(json: JsonObject?): UiTarget? {
         if (json == null) return null
         val elementId = json.optionalString("element_id")
+            ?: json.optionalString("selector_id")
+            ?: json.optionalString("target_id")
         val bounds = json.optJsonArray("fallback_bounds")?.toBounds()
-        if (elementId == null && bounds == null) return null
-        return UiTarget(elementId, bounds)
+        val textContains = json.optionalString("text_contains") ?: json.optionalString("label")
+        if (elementId == null && bounds == null && textContains == null) return null
+        return UiTarget(elementId, bounds, textContains)
     }
 
     private fun parseAssertion(json: JsonObject?): UiAssertion? {

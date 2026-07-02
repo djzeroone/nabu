@@ -211,6 +211,26 @@ class UiActionValidatorTest {
     }
 
     @Test
+    fun plannerResolvesSelectorIdAndUniqueVisibleLabelAliases() {
+        val toggle = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val selectorPlan = UiActionPlanParser.parsePlannerOutput(
+            rawJson = """{"action":"tap","selector_id":"${toggle.id}"}""",
+            knownGoal = "Turn on dark mode",
+            knownScreenId = screen.screenId
+        ).resolveElementReferences(screen)
+        val labelPlan = UiActionPlanParser.parsePlannerOutput(
+            rawJson = """{"action":"tap_text","text_contains":"Dark mode"}""",
+            knownGoal = "Turn on dark mode",
+            knownScreenId = screen.screenId
+        ).resolveElementReferences(screen)
+
+        assertEquals(toggle.id, (selectorPlan.steps.single() as UiActionStep.Tap).target.elementId)
+        assertEquals(toggle.id, (labelPlan.steps.single() as UiActionStep.Tap).target.elementId)
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(selectorPlan, screen))
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(labelPlan, screen))
+    }
+
+    @Test
     fun validatesControlUiActionSeries() {
         val toggle = screen.elements.first { it.resourceId == "android:id/switch_widget" }
         val input = screen.elements.first { it.resourceId == "android:id/search_src_text" }

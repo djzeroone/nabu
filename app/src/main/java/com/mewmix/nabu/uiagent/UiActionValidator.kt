@@ -141,3 +141,39 @@ object UiActionValidator {
         return (listOf(plan.goal) + targetText).joinToString(" ")
     }
 }
+
+internal fun UiActionPlan.resolveElementReferences(screen: UiScreenState): UiActionPlan = copy(
+    steps = steps.map { step ->
+        when (step) {
+            is UiActionStep.Tap -> step.copy(target = step.target.resolve(screen))
+            is UiActionStep.LongPress -> step.copy(target = step.target.resolve(screen))
+            is UiActionStep.TypeText -> step.copy(target = step.target?.resolve(screen))
+            is UiActionStep.Scroll -> step.copy(target = step.target?.resolve(screen))
+            is UiActionStep.Assert -> step.copy(
+                condition = step.condition.copy(
+                    elementId = step.condition.elementId?.let { id -> screen.element(id)?.id ?: id }
+                )
+            )
+            else -> step
+        }
+    }
+)
+
+private fun UiTarget.resolve(screen: UiScreenState): UiTarget {
+    val resolvedById = elementId?.let(screen::element)
+    val resolvedByLabel = if (resolvedById == null && elementId == null && textContains != null) {
+        val query = textContains.trim()
+        val candidates = screen.plannerElements().filter { element ->
+            screen.plannerLabel(element)?.contains(query, ignoreCase = true) == true
+        }
+        candidates.singleOrNull()
+            ?: candidates.singleOrNull { screen.plannerLabel(it).equals(query, ignoreCase = true) }
+    } else {
+        null
+    }
+    val resolved = resolvedById ?: resolvedByLabel
+    return copy(
+        elementId = resolved?.id ?: elementId,
+        fallbackBounds = fallbackBounds ?: resolved?.bounds
+    )
+}

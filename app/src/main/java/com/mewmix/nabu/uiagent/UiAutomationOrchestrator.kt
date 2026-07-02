@@ -185,7 +185,7 @@ class UiAutomationOrchestrator(
             rawJson = extractJson(rawPlan),
             knownGoal = goal,
             knownScreenId = observation.screen.screenId
-        ).canonicalizeElementIds(observation.screen)
+        ).resolveElementReferences(observation.screen)
     }
 
     private suspend fun plan(
@@ -337,27 +337,6 @@ class UiAutomationOrchestrator(
             add("elements", elements)
         }.toString()
     }
-
-    private fun UiActionPlan.canonicalizeElementIds(screen: UiScreenState): UiActionPlan = copy(
-        steps = steps.map { step ->
-            when (step) {
-                is UiActionStep.Tap -> step.copy(target = step.target.canonicalize(screen))
-                is UiActionStep.LongPress -> step.copy(target = step.target.canonicalize(screen))
-                is UiActionStep.TypeText -> step.copy(target = step.target?.canonicalize(screen))
-                is UiActionStep.Scroll -> step.copy(target = step.target?.canonicalize(screen))
-                is UiActionStep.Assert -> step.copy(
-                    condition = step.condition.copy(
-                        elementId = step.condition.elementId?.let { id -> screen.element(id)?.id ?: id }
-                    )
-                )
-                else -> step
-            }
-        }
-    )
-
-    private fun UiTarget.canonicalize(screen: UiScreenState): UiTarget = copy(
-        elementId = elementId?.let { id -> screen.element(id)?.id ?: id }
-    )
 
     private fun describeConfirmation(plan: UiActionPlan, reason: String): String =
         "$reason\n\nGoal: ${plan.goal}\nAction: ${plan.steps.first { it !is UiActionStep.Assert }::class.simpleName}"
