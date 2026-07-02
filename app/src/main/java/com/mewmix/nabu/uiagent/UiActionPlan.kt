@@ -46,7 +46,8 @@ object UiActionPlanParser {
                 remove("goal")
                 remove("screen_id")
             }
-            val action = step.get("action")?.asString.orEmpty()
+            val action = normalizeAction(step.get("action")?.asString.orEmpty())
+            step.addProperty("action", action)
             if (action in setOf("tap", "long_press", "type_text", "scroll") && !step.has("target")) {
                 val target = JsonObject()
                 step.remove("element_id")?.let { target.add("element_id", it) }
@@ -80,7 +81,7 @@ object UiActionPlanParser {
         return UiActionPlan(goal, screenId, listOfNotNull(action, assertion))
     }
 
-    private fun parseStep(json: JsonObject): UiActionStep = when (json.requiredString("action")) {
+    private fun parseStep(json: JsonObject): UiActionStep = when (normalizeAction(json.requiredString("action"))) {
         "tap" -> UiActionStep.Tap(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
         "long_press" -> UiActionStep.LongPress(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
         "type_text" -> UiActionStep.TypeText(
@@ -98,6 +99,11 @@ object UiActionPlanParser {
         "ask_user" -> UiActionStep.AskUser(json.requiredString("reason"))
         "done" -> UiActionStep.Done(json.requiredString("summary"))
         else -> error("Unsupported UI action '${json.get("action")?.asString.orEmpty()}'.")
+    }
+
+    private fun normalizeAction(action: String): String = when (val normalized = action.trim().lowercase()) {
+        "tap_text" -> "tap"
+        else -> normalized
     }
 
     private fun parseTarget(json: JsonObject?): UiTarget? {

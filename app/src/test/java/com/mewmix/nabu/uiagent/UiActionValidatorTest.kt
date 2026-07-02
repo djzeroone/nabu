@@ -11,6 +11,8 @@ class UiActionValidatorTest {
           <node package="com.android.settings" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" enabled="true">
             <node text="Dark mode" resource-id="android:id/title" class="android.widget.TextView" bounds="[48,220][420,280]" enabled="true"/>
             <node content-desc="Dark mode" resource-id="android:id/switch_widget" class="android.widget.Switch" bounds="[920,215][1010,285]" clickable="true" enabled="true" checkable="true" checked="false"/>
+            <node resource-id="android:id/search_src_text" class="android.widget.EditText" bounds="[60,350][1020,470]" clickable="true" enabled="true" editable="true"/>
+            <node resource-id="android:id/list" class="android.widget.ScrollView" bounds="[0,500][1080,1800]" enabled="true" scrollable="true"/>
             <node text="Send" class="android.widget.Button" bounds="[800,1900][1020,2050]" clickable="true" enabled="true"/>
             <node class="android.widget.EditText" bounds="[60,1500][1020,1650]" clickable="true" enabled="true" password="true" editable="true"/>
           </node>
@@ -154,6 +156,55 @@ class UiActionValidatorTest {
         assertEquals(screen.screenId, plan.screenId)
         assertEquals(target.id, (plan.steps.single() as UiActionStep.Tap).target.elementId)
         assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
+    }
+
+    @Test
+    fun plannerParserNormalizesTapTextInCompactAndStepEnvelopes() {
+        val target = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val compactPlan = UiActionPlanParser.parsePlannerOutput(
+            rawJson = """{"action":"tap_text","element_id":"${target.id}"}""",
+            knownGoal = "Turn on dark mode",
+            knownScreenId = screen.screenId
+        )
+        val stepPlan = UiActionPlanParser.parse(
+            """{"goal":"Turn on dark mode","screen_id":"${screen.screenId}","steps":[
+              {"action":"tap_text","target":{"element_id":"${target.id}"}}
+            ]}"""
+        )
+
+        listOf(compactPlan, stepPlan).forEach { plan ->
+            assertEquals(target.id, (plan.steps.single() as UiActionStep.Tap).target.elementId)
+            assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
+        }
+    }
+
+    @Test
+    fun validatesControlUiActionSeries() {
+        val toggle = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val input = screen.elements.first { it.resourceId == "android:id/search_src_text" }
+        val list = screen.elements.first { it.resourceId == "android:id/list" }
+        val outputs = listOf(
+            """{"action":"tap_text","element_id":"${toggle.id}"}""",
+            """{"action":"type_text","text":"hello","element_id":"${input.id}"}""",
+            """{"action":"scroll","direction":"down","element_id":"${list.id}"}""",
+            """{"action":"press_back"}""",
+            """{"action":"wait","ms":250}""",
+            """{"action":"done","summary":"Finished the requested UI flow."}"""
+        )
+
+        val plans = outputs.map { output ->
+            UiActionPlanParser.parsePlannerOutput(output, "Complete UI flow", screen.screenId)
+        }
+
+        assertTrue(plans[0].steps.single() is UiActionStep.Tap)
+        assertTrue(plans[1].steps.single() is UiActionStep.TypeText)
+        assertTrue(plans[2].steps.single() is UiActionStep.Scroll)
+        assertEquals(UiActionStep.PressBack, plans[3].steps.single())
+        assertEquals(UiActionStep.Wait(250), plans[4].steps.single())
+        assertTrue(plans[5].steps.single() is UiActionStep.Done)
+        plans.forEach { plan ->
+            assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
+        }
     }
 
     @Test
