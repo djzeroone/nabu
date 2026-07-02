@@ -194,7 +194,12 @@ class UiAutomationOrchestrator(
         jsonRetry: Boolean = false
     ): String? {
         val userContent = buildPlannerInput(goal, observation.screen)
-        val images = if (shouldAttachScreenshot(jsonRetry)) {
+        val attachScreenshot = shouldAttachScreenshot(jsonRetry)
+        logger(
+            "UiAutomation planner input backend=${backend::class.java.simpleName} " +
+                "runtime=${backend.runtimeDescription()} jsonRetry=$jsonRetry screenshot=$attachScreenshot"
+        )
+        val images = if (attachScreenshot) {
             observation.screenshotPath
                 ?.let(BitmapFactory::decodeFile)
                 ?.let(::LlmImageInput)
@@ -230,7 +235,7 @@ class UiAutomationOrchestrator(
 
     private fun shouldAttachScreenshot(jsonRetry: Boolean): Boolean {
         if (jsonRetry || !backend.supportsImageInput()) return false
-        return backend !is LiteRtLmBackend || backend.runtimeConfig.maxNumTokens >= MIN_VISUAL_CONTEXT_TOKENS
+        return backend !is LiteRtLmBackend && !backend.runtimeDescription().startsWith("LITERT-LM")
     }
 
     private suspend fun execute(action: UiActionStep, observation: Observation): ToolResult {
@@ -392,7 +397,6 @@ class UiAutomationOrchestrator(
         private const val MAX_PROMPT_ELEMENTS = 32
         private const val PLANNER_TIMEOUT_MS = 45_000L
         private const val INITIAL_OBSERVATION_DELAY_MS = 500L
-        private const val MIN_VISUAL_CONTEXT_TOKENS = 2048
 
         private val JSON_RETRY_SYSTEM_PROMPT = """
             Return exactly one JSON object and no other text:
