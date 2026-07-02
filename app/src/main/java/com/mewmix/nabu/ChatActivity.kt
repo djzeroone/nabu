@@ -50,6 +50,7 @@ import com.mewmix.nabu.ui.brutalist.PanelBox
 import com.mewmix.nabu.viewmodel.ChatViewModel
 import com.mewmix.nabu.chat.LlmRuntimeOverrides
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -68,6 +69,7 @@ class ChatActivity : ComponentActivity() {
     }
 
     private val llmOverrides: LlmRuntimeOverrides? by lazy { readLlmOverrides(intent) }
+    private var parkedForUiAutomation = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -170,13 +172,22 @@ class ChatActivity : ComponentActivity() {
                 ChatModelPicker(
                     models = models,
                     onSelect = { startChat(it, initialPrompt, startVoice) },
-                    onCancel = ::exitChat
+                    onCancel = { exitChat() }
                 )
             }
         }
     }
 
-    private fun exitChat() {
+    private fun exitChat(preserveForUiAutomation: Boolean = false) {
+        if (preserveForUiAutomation) {
+            parkedForUiAutomation = true
+            startActivity(
+                Intent(this, MainActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+            )
+            return
+        }
         if (isTaskRoot) {
             startActivity(
                 Intent(this, MainActivity::class.java).addFlags(
@@ -200,6 +211,18 @@ class ChatActivity : ComponentActivity() {
             }
         }
 
+        lifecycleScope.launch {
+            viewModel.isUiAutomationActive.collect { active ->
+                if (!active && parkedForUiAutomation) {
+                    delay(1_000L)
+                    if (!viewModel.isUiAutomationActive.value && parkedForUiAutomation) {
+                        parkedForUiAutomation = false
+                        finish()
+                    }
+                }
+            }
+        }
+
         setContent {
             NabuTheme {
                 val isInitializing by viewModel.isInitializing.collectAsState()
@@ -207,14 +230,14 @@ class ChatActivity : ComponentActivity() {
                 if (isInitializing) {
                     ChatModelPickerLoading(
                         model = model,
-                        onCancel = ::exitChat
+                        onCancel = { exitChat() }
                     )
                 } else {
                     ChatScreen(
                         viewModel = viewModel,
                         initialMessage = initialPrompt.orEmpty(),
                         startVoice = startVoice,
-                        onExit = ::exitChat
+                        onExit = { exitChat(viewModel.isUiAutomationActive.value) }
                     )
                 }
                 

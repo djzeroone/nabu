@@ -951,6 +951,9 @@ class ChatViewModel(
     private val _orchestration = MutableStateFlow<OrchestrationUiState?>(null)
     val orchestration = _orchestration.asStateFlow()
 
+    private val _isUiAutomationActive = MutableStateFlow(false)
+    val isUiAutomationActive = _isUiAutomationActive.asStateFlow()
+
     fun resolveToolApproval(allow: Boolean) {
         pendingToolApprovalDeferred?.complete(allow)
         _pendingToolApproval.value = null
@@ -2380,6 +2383,7 @@ class ChatViewModel(
                 isError = true
             )
             _orchestration.value = _orchestration.value?.copy(isVisible = false)
+            _isUiAutomationActive.value = true
             delay(250L)
             return try {
                 UiAutomationOrchestrator(
@@ -2399,6 +2403,7 @@ class ChatViewModel(
                 ).run(goal)
             } finally {
                 _orchestration.value = _orchestration.value?.copy(isVisible = true)
+                _isUiAutomationActive.value = false
             }
         }
         ActionTools.execute(appContext, effectiveToolCall)?.let { return it }
