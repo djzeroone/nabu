@@ -168,7 +168,7 @@ class UiActionValidatorTest {
         )
         val stepPlan = UiActionPlanParser.parse(
             """{"goal":"Turn on dark mode","screen_id":"${screen.screenId}","steps":[
-              {"action":"tap_text","target":{"element_id":"${target.id}"}}
+              {"action":"tap_text","element_id":"${target.id}"}
             ]}"""
         )
 
@@ -176,6 +176,38 @@ class UiActionValidatorTest {
             assertEquals(target.id, (plan.steps.single() as UiActionStep.Tap).target.elementId)
             assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
         }
+    }
+
+    @Test
+    fun plannerParserInterpretsCompositeActionOnlyWhenPayloadShapeIsUnambiguous() {
+        val target = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val targeted = UiActionPlanParser.parsePlannerOutput(
+            rawJson = """{"action":"tap|press_back","element_id":"${target.id}"}""",
+            knownGoal = "Turn on dark mode",
+            knownScreenId = screen.screenId
+        )
+        val targetless = UiActionPlanParser.parsePlannerOutput(
+            rawJson = """{"action":"tap|press_back"}""",
+            knownGoal = "Go back",
+            knownScreenId = screen.screenId
+        )
+
+        assertTrue(targeted.steps.single() is UiActionStep.Tap)
+        assertEquals(UiActionStep.PressBack, targetless.steps.single())
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(targeted, screen))
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(targetless, screen))
+    }
+
+    @Test
+    fun pressBackIgnoresSpuriousPlannerTarget() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            rawJson = """{"action":"press_back","element_id":"p0"}""",
+            knownGoal = "Go back",
+            knownScreenId = screen.screenId
+        )
+
+        assertEquals(UiActionStep.PressBack, plan.steps.single())
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
     }
 
     @Test

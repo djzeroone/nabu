@@ -46,22 +46,7 @@ object UiActionPlanParser {
                 remove("goal")
                 remove("screen_id")
             }
-            val action = normalizeAction(step.get("action")?.asString.orEmpty())
-            step.addProperty("action", action)
-            if (action in setOf("tap", "long_press", "type_text", "scroll") && !step.has("target")) {
-                val target = JsonObject()
-                step.remove("element_id")?.let { target.add("element_id", it) }
-                step.remove("fallback_bounds")?.let { target.add("fallback_bounds", it) }
-                if (target.size() > 0) step.add("target", target)
-            }
-            if (action == "assert" && !step.has("condition")) {
-                val condition = JsonObject()
-                listOf("element_id", "text_contains", "checked").forEach { name ->
-                    step.remove(name)?.let { condition.add(name, it) }
-                }
-                if (condition.size() > 0) step.add("condition", condition)
-            }
-            root.add("steps", JsonArray().apply { add(step) })
+            root.add("steps", JsonArray().apply { add(normalizeStepEnvelope(step)) })
         }
         return parse(root.toString())
     }
@@ -74,14 +59,19 @@ object UiActionPlanParser {
             ?: root.optJsonObject("steps")?.let { JsonArray().apply { add(it) } }
             ?: error("Missing steps array.")
         require(rawSteps.size() > 0) { "A plan must contain at least one step." }
-        val parsedSteps = rawSteps.map { parseStep(it.asJsonObject) }
-        val action = parsedSteps.firstOrNull { it !is UiActionStep.Assert }
+        val normalizedSteps = rawSteps.map { normalizeStepEnvelope(it.asJsonObject.deepCopy()) }
+        val actionJson = normalizedSteps.firstOrNull {
+            normalizeAction(it.requiredString("action"), it) != "assert"
+        }
             ?: error("A plan must contain at least one non-assert action.")
-        val assertion = parsedSteps.filterIsInstance<UiActionStep.Assert>().lastOrNull()
+        val action = parseStep(actionJson)
+        val assertion = normalizedSteps.lastOrNull {
+            normalizeAction(it.requiredString("action"), it) == "assert"
+        }?.let(::parseStep) as? UiActionStep.Assert
         return UiActionPlan(goal, screenId, listOfNotNull(action, assertion))
     }
 
-    private fun parseStep(json: JsonObject): UiActionStep = when (normalizeAction(json.requiredString("action"))) {
+    private fun parseStep(json: JsonObject): UiActionStep = when (normalizeAction(json.requiredString("action"), json)) {
         "tap" -> UiActionStep.Tap(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
         "long_press" -> UiActionStep.LongPress(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
         "type_text" -> UiActionStep.TypeText(
@@ -101,10 +91,61 @@ object UiActionPlanParser {
         else -> error("Unsupported UI action '${json.get("action")?.asString.orEmpty()}'.")
     }
 
-    private fun normalizeAction(action: String): String = when (val normalized = action.trim().lowercase()) {
-        "tap_text" -> "tap"
+    private fun normalizeStepEnvelope(step: JsonObject): JsonObject {
+        val action = normalizeAction(step.get("action")?.asString.orEmpty(), step)
+        step.addProperty("action", action)
+        if (action in TARGET_ACTIONS && !step.has("target")) {
+            val target = JsonObject()
+            step.remove("element_id")?.let { target.add("element_id", it) }
+            step.remove("fallback_bounds")?.let { target.add("fallback_bounds", it) }
+            if (target.size() > 0) step.add("target", target)
+        }
+        if (action == "assert" && !step.has("condition")) {
+            val condition = JsonObject()
+            listOf("element_id", "text_contains", "checked").forEach { name ->
+                step.remove(name)?.let { condition.add(name, it) }
+            }
+            if (condition.size() > 0) step.add("condition", condition)
+        }
+        return step
+    }
+
+    private fun normalizeAction(action: String, step: JsonObject? = null): String {
+        val normalized = normalizeActionToken(action)
+        if (normalized in SUPPORTED_ACTIONS) return normalized
+
+        val candidates = action.lowercase()
+            .split('|', '/')
+            .map(::normalizeActionToken)
+            .filter { it in SUPPORTED_ACTIONS }
+            .distinct()
+        if (candidates.size == 1) return candidates.single()
+        if (candidates.size > 1) {
+            val hasTarget = step?.has("target") == true ||
+                step?.has("element_id") == true ||
+                step?.has("fallback_bounds") == true
+            val shapeMatches = candidates.filter { candidate ->
+                if (hasTarget) candidate in TARGET_ACTIONS else candidate !in TARGET_ACTIONS
+            }
+            if (shapeMatches.size == 1) return shapeMatches.single()
+        }
+        return normalized
+    }
+
+    private fun normalizeActionToken(action: String): String = when (
+        val normalized = action.trim().lowercase().replace('-', '_').replace(' ', '_')
+    ) {
+        "tap_text", "click", "click_text" -> "tap"
+        "longpress", "long_press_text" -> "long_press"
+        "input_text", "set_text", "enter_text" -> "type_text"
+        "back", "go_back" -> "press_back"
+        "home", "go_home" -> "press_home"
         else -> normalized
     }
+
+    private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll")
+    private val SUPPORTED_ACTIONS = TARGET_ACTIONS +
+        setOf("press_back", "press_home", "wait", "assert", "ask_user", "done")
 
     private fun parseTarget(json: JsonObject?): UiTarget? {
         if (json == null) return null

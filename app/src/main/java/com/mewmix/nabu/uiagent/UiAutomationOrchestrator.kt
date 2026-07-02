@@ -405,11 +405,12 @@ class UiAutomationOrchestrator(
               "screen_id": "the exact screen_id provided",
               "steps": [
                 {
-                  "action": "tap|long_press|type_text|scroll|press_back|press_home|wait|ask_user|done",
+                  "action": "tap",
                   "target": {"element_id": "p0"}
                 }
               ]
             }
+            Allowed action values: tap, long_press, type_text, scroll, press_back, press_home, wait, ask_user, done.
             Copy goal and screen_id exactly. Use only a supplied element id. Never use Markdown.
         """.trimIndent()
 
