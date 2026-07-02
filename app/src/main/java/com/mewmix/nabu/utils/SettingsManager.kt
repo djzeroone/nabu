@@ -681,7 +681,7 @@ object SettingsManager {
         (DatabaseManager.getSetting(context, KEY_LITERT_AUDIO_ENABLED) ?: "1") == "1"
 
     fun getLiteRtLmRuntimeConfig(context: Context): LiteRtLmRuntimeConfig = LiteRtLmRuntimeConfig(
-        maxNumTokens = getMediaPipeMaxTokens(context),
+        maxNumTokens = getMediaPipeMaxTokens(context).coerceAtLeast(LiteRtLmRuntimeConfig.MIN_CONTEXT_TOKENS),
         topK = getMediaPipeTopK(context),
         topP = getMediaPipeTopP(context).toDouble(),
         temperature = getMediaPipeTemperature(context).toDouble(),

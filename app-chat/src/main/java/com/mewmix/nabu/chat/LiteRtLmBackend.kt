@@ -21,14 +21,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 data class LiteRtLmRuntimeConfig(
-    val maxNumTokens: Int = 1024,
+    val maxNumTokens: Int = MIN_CONTEXT_TOKENS,
     val topK: Int = 64,
     val topP: Double = 0.95,
     val temperature: Double = 1.0,
     val preferredBackend: String = "default",
     val enableVision: Boolean = true,
     val enableAudio: Boolean = true
-)
+) {
+    companion object {
+        const val MIN_CONTEXT_TOKENS = 2048
+    }
+}
 
 private fun liteRtLmBackendCandidates(
     context: Context,

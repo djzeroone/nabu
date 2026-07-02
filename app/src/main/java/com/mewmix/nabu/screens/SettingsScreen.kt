@@ -793,7 +793,7 @@ fun SettingsScreen(
                     mediaPipeMaxTokens = filtered
                     filtered.toIntOrNull()?.let { SettingsManager.setMediaPipeMaxTokens(context, it) }
                 },
-                label = { Text("Max Tokens") },
+                label = { Text("Max Tokens (LiteRT minimum 2048)") },
                 modifier = Modifier.fillMaxWidth()
             )
 
