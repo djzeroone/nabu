@@ -7,6 +7,7 @@ import com.google.gson.JsonObject
 import com.mewmix.nabu.chat.LlmBackend
 import com.mewmix.nabu.chat.LlmImageInput
 import com.mewmix.nabu.chat.LlmMessage
+import com.mewmix.nabu.chat.LiteRtLmBackend
 import com.mewmix.nabu.tools.GlaiveBridge
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolResult
@@ -14,6 +15,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 class UiAutomationOrchestrator(
@@ -30,7 +32,17 @@ class UiAutomationOrchestrator(
         val screenshotPath: String?
     )
 
+    private val pendingArtifactPaths = linkedSetOf<String>()
+
     suspend fun run(goal: String): ToolResult {
+        return try {
+            runWithCleanup(goal)
+        } finally {
+            cleanupArtifacts(pendingArtifactPaths.toList())
+        }
+    }
+
+    private suspend fun runWithCleanup(goal: String): ToolResult {
         if (goal.isBlank()) return failure("UI automation goal is blank.")
         onProgress("Observe", "Capturing the active window and accessibility tree")
         delay(INITIAL_OBSERVATION_DELAY_MS)
@@ -39,19 +51,21 @@ class UiAutomationOrchestrator(
 
         repeat(MAX_ACTIONS) { actionIndex ->
             onProgress("Plan ${actionIndex + 1}", "Choosing the next UI action")
-            val rawPlan = plan(goal, observation)
+            var rawPlan = plan(goal, observation)
                 ?: return failure("The UI planner returned no usable plan.")
-            val actionPlan = runCatching {
-                UiActionPlanParser.parsePlannerOutput(
-                    rawJson = extractJson(rawPlan),
-                    knownGoal = goal,
-                    knownScreenId = observation.screen.screenId
-                ).canonicalizeElementIds(observation.screen)
+            var parsedPlan = parsePlan(rawPlan, goal, observation)
+            if (parsedPlan.isFailure) {
+                val firstError = parsedPlan.exceptionOrNull()
+                logger("UiAutomation planner parse failed: ${firstError?.message}; output=${rawPlan.take(500)}")
+                onProgress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
+                rawPlan = plan(goal, observation, jsonRetry = true)
+                    ?: return failure("The UI planner returned no usable JSON after retry.")
+                parsedPlan = parsePlan(rawPlan, goal, observation)
             }
-                .getOrElse { error ->
-                    logger("UiAutomation planner parse failed: ${error.message}; output=${rawPlan.take(500)}")
-                    return failure("The UI planner returned invalid action JSON: ${error.message}")
-                }
+            val actionPlan = parsedPlan.getOrElse { error ->
+                logger("UiAutomation planner retry parse failed: ${error.message}; output=${rawPlan.take(500)}")
+                return failure("The UI planner returned invalid action JSON after retry: ${error.message}")
+            }
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> {
@@ -114,10 +128,16 @@ class UiAutomationOrchestrator(
         return runCatching {
             val envelope = JSONObject(result.output)
             require(envelope.optInt("schema_version") == 2) { "Unsupported observation schema." }
-            val xmlPath = envelope.getString("xml_path")
+            val returnedXmlPath = envelope.getString("xml_path")
+            val returnedScreenshotPath = envelope.optString("screenshot_path").takeIf(String::isNotBlank)
+            val artifactPaths = listOfNotNull(returnedXmlPath, returnedScreenshotPath)
+            require(artifactPaths.all(::isGeneratedObservationPath)) {
+                "Glaive returned unexpected observation artifact paths."
+            }
+            pendingArtifactPaths.addAll(artifactPaths)
             val xmlResult = GlaiveBridge.executeTool(
                 context,
-                ToolCall("read_ui_xml", mapOf("path" to xmlPath))
+                ToolCall("read_ui_xml", mapOf("path" to returnedXmlPath))
             )
             require(!xmlResult.isError) { xmlResult.output }
             val packageName = envelope.optString("package").takeIf(String::isNotBlank)
@@ -125,14 +145,56 @@ class UiAutomationOrchestrator(
             Observation(
                 bridgeObservationId = envelope.getString("observation_id"),
                 screen = UiTreeIndexer.parse(xmlResult.output, packageName, windowTitle),
-                screenshotPath = envelope.optString("screenshot_path").takeIf(String::isNotBlank)
+                screenshotPath = returnedScreenshotPath
             )
-        }.onFailure { logger("UiAutomation observation parse failed: ${it.message}") }.getOrNull()
+        }.onFailure {
+            logger("UiAutomation observation parse failed: ${it.message}")
+        }.getOrNull()
     }
 
-    private suspend fun plan(goal: String, observation: Observation): String? {
+    private suspend fun cleanupArtifacts(paths: Collection<String>) {
+        paths.forEach { path ->
+            if (!isGeneratedObservationPath(path)) {
+                logger("UiAutomation refused to delete unexpected artifact path $path")
+                return@forEach
+            }
+            val deletedLocally = runCatching { !File(path).exists() || File(path).delete() }.getOrDefault(false)
+            val deleted = deletedLocally || !GlaiveBridge.executeTool(
+                context,
+                ToolCall("delete_file", mapOf("path" to path))
+            ).isError
+            if (!deleted) logger("UiAutomation could not delete consumed artifact $path")
+            if (deleted) pendingArtifactPaths.remove(path)
+        }
+    }
+
+    private fun isGeneratedObservationPath(path: String): Boolean {
+        val normalized = path.replace("/sdcard/", "/storage/emulated/0/")
+        val file = File(normalized)
+        return file.parent == "/storage/emulated/0/Download" &&
+            file.name.startsWith("nabu_ui_") &&
+            (file.extension == "xml" || file.extension == "png")
+    }
+
+    private fun parsePlan(
+        rawPlan: String,
+        goal: String,
+        observation: Observation
+    ): Result<UiActionPlan> = runCatching {
+        UiActionPlanParser.parsePlannerOutput(
+            rawJson = extractJson(rawPlan),
+            knownGoal = goal,
+            knownScreenId = observation.screen.screenId
+        ).canonicalizeElementIds(observation.screen)
+    }
+
+    private suspend fun plan(
+        goal: String,
+        observation: Observation,
+        jsonRetry: Boolean = false
+    ): String? {
         val userContent = buildPlannerInput(goal, observation.screen)
-        val images = if (backend.supportsImageInput()) {
+        val images = if (shouldAttachScreenshot(jsonRetry)) {
             observation.screenshotPath
                 ?.let(BitmapFactory::decodeFile)
                 ?.let(::LlmImageInput)
@@ -142,7 +204,10 @@ class UiAutomationOrchestrator(
             emptyList()
         }
         val conversation = listOf(
-            LlmMessage(role = "system", content = PLANNER_SYSTEM_PROMPT),
+            LlmMessage(
+                role = "system",
+                content = if (jsonRetry) JSON_RETRY_SYSTEM_PROMPT else PLANNER_SYSTEM_PROMPT
+            ),
             LlmMessage(role = "user", content = userContent, images = images)
         )
         val completion = CompletableDeferred<String?>()
@@ -161,6 +226,11 @@ class UiAutomationOrchestrator(
                     "elements=${observation.screen.plannerElements(MAX_PROMPT_ELEMENTS).size}: ${raw.take(2_000)}"
             )
         }
+    }
+
+    private fun shouldAttachScreenshot(jsonRetry: Boolean): Boolean {
+        if (jsonRetry || !backend.supportsImageInput()) return false
+        return backend !is LiteRtLmBackend || backend.runtimeConfig.maxNumTokens >= MIN_VISUAL_CONTEXT_TOKENS
     }
 
     private suspend fun execute(action: UiActionStep, observation: Observation): ToolResult {
@@ -319,49 +389,36 @@ class UiAutomationOrchestrator(
         const val CONTROL_UI_TOOL = "control_ui"
         private const val MAX_ACTIONS = 5
         private const val MAX_UNCHANGED_OBSERVATIONS = 2
-        private const val MAX_PROMPT_ELEMENTS = 100
+        private const val MAX_PROMPT_ELEMENTS = 32
         private const val PLANNER_TIMEOUT_MS = 45_000L
         private const val INITIAL_OBSERVATION_DELAY_MS = 500L
+        private const val MIN_VISUAL_CONTEXT_TOKENS = 2048
 
-        private val PLANNER_SYSTEM_PROMPT = """
-            You are an Android UI automation planner. Return only one valid JSON object matching this schema:
+        private val JSON_RETRY_SYSTEM_PROMPT = """
+            Return exactly one JSON object and no other text:
             {
               "goal": "the user's goal",
               "screen_id": "the exact screen_id provided",
               "steps": [
                 {
-                  "action": "tap|long_press|type_text|scroll|wait|ask_user|done|assert",
-                  "target": {
-                    "element_id": "optional element id",
-                    "fallback_bounds": [0, 0, 100, 100]
-                  },
-                  "text": "text to type (if action=type_text)",
-                  "direction": "UP|DOWN|LEFT|RIGHT (if action=scroll)",
-                  "ms": 1000,
-                  "reason": "reason to ask user (if action=ask_user)",
-                  "summary": "summary of completion (if action=done)",
-                  "condition": {
-                    "element_id": "optional id",
-                    "text_contains": "optional text",
-                    "checked": true
-                  }
+                  "action": "tap|long_press|type_text|scroll|press_back|press_home|wait|ask_user|done",
+                  "target": {"element_id": "p0"}
                 }
               ]
             }
+            Copy goal and screen_id exactly. Use only a supplied element id. Never use Markdown.
+        """.trimIndent()
 
-            Use the supplied goal, screenshot when present, and indexed UI elements.
-            The screen_id must exactly match the supplied screen_id.
-            Emit exactly one non-assert action and optionally one trailing assert action in the steps array.
-            Element IDs are short aliases such as p0 and p12. Copy an ID exactly from the supplied elements array.
-            Every supplied element is actionable. Use its label and capability flags to choose the target.
-            Prefer element_id. Use fallback_bounds (exactly 4 integers: left, top, right, bottom) only when no reliable element exists.
-            If element_id is present, omit fallback_bounds.
-            Supported actions: tap, long_press, type_text, press_back, press_home, scroll, wait, ask_user, done, assert.
-            Use done with a short summary when the goal is already satisfied.
-            Use ask_user when confidence is low or the target is ambiguous.
-            For goals involving typing or sending text, use type_text only when the exact text is present in the goal. Otherwise use ask_user. Never tap unrelated controls to discover missing text.
+        private val PLANNER_SYSTEM_PROMPT = """
+            Plan one safe Android UI action. Return one JSON object only, with no Markdown.
+            Required: exact supplied goal, exact screen_id, and steps containing exactly one action.
+            Actions: tap, long_press, type_text, scroll, press_back, press_home, wait, ask_user, done.
+            Targets use {"element_id":"p0"}; copy only an id supplied in elements.
+            type_text requires exact text from the goal. scroll requires direction UP, DOWN, LEFT, or RIGHT.
+            wait uses ms. ask_user uses reason. done uses summary.
+            You may append one assert step with condition containing element_id, text_contains, or checked.
+
             Never plan payments, purchases, passwords, 2FA, account deletion, factory reset, permission escalation, or unknown APK installation.
-            Include an assertion after state-changing actions when the expected result is visible.
         """.trimIndent()
     }
 }

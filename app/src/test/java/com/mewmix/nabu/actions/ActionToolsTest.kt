@@ -5,6 +5,7 @@ import android.content.Context
 import android.provider.Settings
 import androidx.test.core.app.ApplicationProvider
 import com.mewmix.nabu.tools.ToolCall
+import com.mewmix.nabu.uiagent.UiAutomationOrchestrator
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -93,6 +94,15 @@ class ActionToolsTest {
             "toggle_bluetooth",
             "share_text"
         )))
+    }
+
+    @Test
+    fun controlUi_isAvailableToScheduledAgentButNotStandaloneBackgroundStep() {
+        val toolName = UiAutomationOrchestrator.CONTROL_UI_TOOL
+
+        assertFalse(ActionTools.isSchedulableTool(toolName))
+        assertTrue(ActionTools.isScheduledAgentTool(toolName))
+        assertTrue(ActionTools.schedulableToolsForAgent().any { it.name == toolName })
     }
 
     @Test

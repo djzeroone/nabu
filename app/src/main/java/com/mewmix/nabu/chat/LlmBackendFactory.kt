@@ -32,7 +32,9 @@ object LlmBackendFactory {
                 context = appContext,
                 model = remoteSelection.modelSlug
             )
-            backend.initialize()
+            if (initializeSynchronously) {
+                backend.initialize()
+            }
             return CreatedBackend(
                 backend = backend,
                 model = model,
@@ -62,14 +64,22 @@ object LlmBackendFactory {
                     modelId = model.id,
                     modelPath = artifact.file.absolutePath,
                     runtimeConfig = runtimeConfig
-                ).also { it.initialize() }
+                ).also {
+                    if (initializeSynchronously) {
+                        it.initialize()
+                    }
+                }
             }
             else -> {
                 MediaPipeBackend(
                     context = appContext,
                     modelPath = artifact.file.absolutePath,
                     initialConfig = SettingsManager.getMediaPipeRuntimeConfig(appContext)
-                ).also { it.initialize() }
+                ).also {
+                    if (initializeSynchronously) {
+                        it.initialize()
+                    }
+                }
             }
         }
 

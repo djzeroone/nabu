@@ -1862,10 +1862,12 @@ class ChatViewModel(
         llmBackend?.close()
         llmBackend = created.backend
         _llmRuntimeDescription.value = created.backend.runtimeDescription()
-        if (created.backend is LlamaCppBackend) {
-            _isInitializing.value = true
-            viewModelScope.launch(Dispatchers.IO) {
+        _isInitializing.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
                 created.backend.initialize()
+                _llmRuntimeDescription.value = created.backend.runtimeDescription()
+            } finally {
                 _isInitializing.value = false
             }
         }

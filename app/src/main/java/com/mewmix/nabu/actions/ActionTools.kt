@@ -291,11 +291,14 @@ object ActionTools {
 
     fun isSchedulableTool(toolName: String): Boolean = toolName in schedulableToolNames
 
+    fun isScheduledAgentTool(toolName: String): Boolean =
+        isSchedulableTool(toolName) || toolName == UiAutomationOrchestrator.CONTROL_UI_TOOL
+
     fun schedulableToolsForAgent(): List<Tool> =
         tools.filter { tool ->
             tool.isAvailable &&
                 tool.name != SCHEDULED_AGENT_STEP_TOOL &&
-                isSchedulableTool(tool.name)
+                isScheduledAgentTool(tool.name)
         }
 
     private fun runGetCurrentTime(call: ToolCall): ToolResult {

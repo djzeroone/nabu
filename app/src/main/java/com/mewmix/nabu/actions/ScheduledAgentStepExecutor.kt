@@ -1,12 +1,17 @@
 package com.mewmix.nabu.actions
 
 import android.content.Context
+import android.app.KeyguardManager
+import android.os.PowerManager
 import com.mewmix.nabu.agent.AgentTurnRunner
+import com.mewmix.nabu.chat.LlmBackend
 import com.mewmix.nabu.chat.LlmBackendFactory
 import com.mewmix.nabu.chat.LlmMessage
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolCallProtocol
 import com.mewmix.nabu.tools.ToolResult
+import com.mewmix.nabu.tools.GlaiveBridge
+import com.mewmix.nabu.uiagent.UiAutomationOrchestrator
 import com.mewmix.nabu.utils.DebugLogger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
@@ -71,7 +76,7 @@ object ScheduledAgentStepExecutor {
             AgentTurnRunner(
                 backend = created.backend,
                 scope = this,
-                toolExecutor = { call -> executeBackgroundTool(context, call) },
+                toolExecutor = { call -> executeBackgroundTool(context, created.backend, call) },
                 inferToolCallFromModelFailure = { _, _ -> null },
                 recoveryConversationProvider = { conversation.takeLast(2) },
                 logger = { DebugLogger.log(it) }
@@ -114,7 +119,9 @@ object ScheduledAgentStepExecutor {
         val system = ToolCallProtocol.buildSystemPrompt(
             basePrompt = """
                 You are Nabu running a scheduled background action.
-                Execute only background-safe tools when needed.
+                Execute only the supplied scheduled-agent tools when needed.
+                control_ui may act on the currently visible UI only when the device is awake and unlocked.
+                Do not attempt control_ui actions that require user confirmation during a scheduled run.
                 Do not ask the user for clarification; use the scheduled instruction and available context.
                 Finish with a concise summary of what happened.
             """.trimIndent(),
@@ -155,7 +162,11 @@ object ScheduledAgentStepExecutor {
         )
     }
 
-    private fun executeBackgroundTool(context: Context, call: ToolCall): ToolResult {
+    private suspend fun executeBackgroundTool(
+        context: Context,
+        backend: LlmBackend,
+        call: ToolCall
+    ): ToolResult {
         if (call.toolName == ActionTools.SCHEDULED_AGENT_STEP_TOOL) {
             return ToolResult(
                 toolName = call.toolName,
@@ -163,12 +174,36 @@ object ScheduledAgentStepExecutor {
                 isError = true
             )
         }
-        if (!ActionTools.isSchedulableTool(call.toolName)) {
+        if (!ActionTools.isScheduledAgentTool(call.toolName)) {
             return ToolResult(
                 toolName = call.toolName,
                 output = "Tool '${call.toolName}' cannot run from scheduled background execution.",
                 isError = true
             )
+        }
+        if (call.toolName == UiAutomationOrchestrator.CONTROL_UI_TOOL) {
+            val goal = call.arguments["goal"]?.toString()?.trim().orEmpty()
+            if (goal.isBlank()) {
+                return ToolResult(call.toolName, "Scheduled control_ui requires a goal.", true)
+            }
+            val powerManager = context.getSystemService(PowerManager::class.java)
+            val keyguardManager = context.getSystemService(KeyguardManager::class.java)
+            if (powerManager?.isInteractive != true || keyguardManager?.isKeyguardLocked == true) {
+                return ToolResult(
+                    call.toolName,
+                    "Scheduled control_ui requires the device to be awake and unlocked.",
+                    true
+                )
+            }
+            if (!GlaiveBridge.isInstalled(context)) {
+                return ToolResult(call.toolName, "Glaive is not installed.", true)
+            }
+            return UiAutomationOrchestrator(
+                context = context,
+                backend = backend,
+                requestConfirmation = { false },
+                logger = { DebugLogger.log("Scheduled $it") }
+            ).run(goal)
         }
         return ActionTools.execute(context, call) ?: ToolResult(
             toolName = call.toolName,
