@@ -56,12 +56,12 @@ object LlmBackendFactory {
                 }
             }
             "litertlm" -> {
-                val preferredBackend = SettingsManager.getMediaPipeBackend(appContext)
+                val runtimeConfig = SettingsManager.getLiteRtLmRuntimeConfig(appContext)
                 LiteRtLmBackend(
                     context = appContext,
                     modelId = model.id,
                     modelPath = artifact.file.absolutePath,
-                    preferredBackend = preferredBackend
+                    runtimeConfig = runtimeConfig
                 ).also { it.initialize() }
             }
             else -> {
@@ -76,6 +76,7 @@ object LlmBackendFactory {
         val maxTokens = when (backend) {
             is LlamaCppBackend -> backend.currentConfig.nCtx
             is MediaPipeBackend -> backend.currentConfig.maxTokens
+            is LiteRtLmBackend -> backend.runtimeConfig.maxNumTokens
             else -> DEFAULT_MAX_CONTEXT_TOKENS
         }
         return CreatedBackend(backend = backend, model = model, maxContextTokens = maxTokens)

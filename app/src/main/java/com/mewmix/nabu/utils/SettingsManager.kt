@@ -3,6 +3,7 @@ package com.mewmix.nabu.utils
 import android.content.Context
 import com.mewmix.nabu.chat.LlmRuntimeConfig
 import com.mewmix.nabu.chat.LlmRuntimeOverrides
+import com.mewmix.nabu.chat.LiteRtLmRuntimeConfig
 import com.mewmix.nabu.chat.MediaPipeRuntimeConfig
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.gson.Gson
@@ -32,6 +33,8 @@ object SettingsManager {
     private const val KEY_MEDIAPIPE_TEMPERATURE = "mediapipe_temperature"
     private const val KEY_MEDIAPIPE_RANDOM_SEED = "mediapipe_random_seed"
     private const val KEY_MEDIAPIPE_BACKEND = "mediapipe_backend"
+    private const val KEY_LITERT_VISION_ENABLED = "litert_vision_enabled"
+    private const val KEY_LITERT_AUDIO_ENABLED = "litert_audio_enabled"
     private const val KEY_SOPRANO_TOP_K = "soprano_top_k"
     private const val KEY_SOPRANO_TOP_P = "soprano_top_p"
     private const val KEY_SOPRANO_TEMPERATURE = "soprano_temperature"
@@ -662,6 +665,30 @@ object SettingsManager {
         val value = DatabaseManager.getSetting(context, KEY_MEDIAPIPE_BACKEND)?.lowercase().orEmpty()
         return if (value in setOf("default", "cpu", "gpu")) value else "default"
     }
+
+    fun setLiteRtVisionEnabled(context: Context, enabled: Boolean) {
+        DatabaseManager.setSetting(context, KEY_LITERT_VISION_ENABLED, if (enabled) "1" else "0")
+    }
+
+    fun isLiteRtVisionEnabled(context: Context): Boolean =
+        (DatabaseManager.getSetting(context, KEY_LITERT_VISION_ENABLED) ?: "1") == "1"
+
+    fun setLiteRtAudioEnabled(context: Context, enabled: Boolean) {
+        DatabaseManager.setSetting(context, KEY_LITERT_AUDIO_ENABLED, if (enabled) "1" else "0")
+    }
+
+    fun isLiteRtAudioEnabled(context: Context): Boolean =
+        (DatabaseManager.getSetting(context, KEY_LITERT_AUDIO_ENABLED) ?: "1") == "1"
+
+    fun getLiteRtLmRuntimeConfig(context: Context): LiteRtLmRuntimeConfig = LiteRtLmRuntimeConfig(
+        maxNumTokens = getMediaPipeMaxTokens(context),
+        topK = getMediaPipeTopK(context),
+        topP = getMediaPipeTopP(context).toDouble(),
+        temperature = getMediaPipeTemperature(context).toDouble(),
+        preferredBackend = getMediaPipeBackend(context),
+        enableVision = isLiteRtVisionEnabled(context),
+        enableAudio = isLiteRtAudioEnabled(context)
+    )
 
     fun getMediaPipeRuntimeConfig(context: Context): MediaPipeRuntimeConfig {
         val preferredBackend = when (getMediaPipeBackend(context)) {

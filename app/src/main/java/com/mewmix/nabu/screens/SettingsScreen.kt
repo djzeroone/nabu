@@ -108,6 +108,8 @@ fun SettingsScreen(
     var mediaPipeTopP by remember { mutableStateOf(SettingsManager.getMediaPipeTopP(context).toString()) }
     var mediaPipeTemperature by remember { mutableStateOf(SettingsManager.getMediaPipeTemperature(context).toString()) }
     var mediaPipeRandomSeed by remember { mutableStateOf(SettingsManager.getMediaPipeRandomSeed(context).toString()) }
+    var liteRtVisionEnabled by remember { mutableStateOf(SettingsManager.isLiteRtVisionEnabled(context)) }
+    var liteRtAudioEnabled by remember { mutableStateOf(SettingsManager.isLiteRtAudioEnabled(context)) }
     var updateStatus by remember { mutableStateOf(UpdateChecker.cachedStatus(context)) }
     var checkingForUpdate by remember { mutableStateOf(false) }
     var updateError by remember { mutableStateOf<String?>(null) }
@@ -759,7 +761,7 @@ fun SettingsScreen(
                     value = when (mediaPipeBackend) {
                         "cpu" -> "CPU"
                         "gpu" -> "GPU"
-                        else -> "Default"
+                        else -> "Auto (GPU preferred)"
                     },
                     onValueChange = {},
                     readOnly = true,
@@ -771,7 +773,7 @@ fun SettingsScreen(
                     expanded = mediaPipeBackendExpanded,
                     onDismissRequest = { mediaPipeBackendExpanded = false }
                 ) {
-                    listOf("default" to "Default", "cpu" to "CPU", "gpu" to "GPU").forEach { (id, label) ->
+                    listOf("default" to "Auto (GPU preferred)", "cpu" to "CPU", "gpu" to "GPU").forEach { (id, label) ->
                         DropdownMenuItem(
                             text = { Text(label) },
                             onClick = {
@@ -793,6 +795,24 @@ fun SettingsScreen(
                 },
                 label = { Text("Max Tokens") },
                 modifier = Modifier.fillMaxWidth()
+            )
+
+            SwitchToggle(
+                checked = liteRtVisionEnabled,
+                onToggle = {
+                    liteRtVisionEnabled = it
+                    SettingsManager.setLiteRtVisionEnabled(context, it)
+                },
+                label = "Enable LiteRT vision encoder"
+            )
+
+            SwitchToggle(
+                checked = liteRtAudioEnabled,
+                onToggle = {
+                    liteRtAudioEnabled = it
+                    SettingsManager.setLiteRtAudioEnabled(context, it)
+                },
+                label = "Enable LiteRT audio encoder"
             )
 
             TextField(

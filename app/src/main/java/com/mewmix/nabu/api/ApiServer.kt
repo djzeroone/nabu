@@ -1135,7 +1135,7 @@ class ApiServer(
                     context = context,
                     modelId = targetModel.id,
                     modelPath = artifact.file.absolutePath,
-                    preferredBackend = SettingsManager.getMediaPipeBackend(context)
+                    runtimeConfig = SettingsManager.getLiteRtLmRuntimeConfig(context)
                 )
                 else -> MediaPipeBackend(
                     context = context,
