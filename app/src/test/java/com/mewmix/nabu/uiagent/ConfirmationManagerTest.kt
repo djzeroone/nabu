@@ -46,10 +46,13 @@ class ConfirmationManagerTest {
             destination = "dest",
             contentHash = "hash"
         )
-        assertFalse(ConfirmationManager.hasValidGrant("s2", "screen1", "fingerprint1", "dest", "hash"))
-        assertFalse(ConfirmationManager.hasValidGrant("s1", "screen2", "fingerprint1", "dest", "hash"))
-        assertFalse(ConfirmationManager.hasValidGrant("s1", "screen1", "fingerprint2", "dest", "hash"))
-        assertFalse(ConfirmationManager.hasValidGrant("s1", "screen1", "fingerprint1", "dest2", "hash"))
-        assertFalse(ConfirmationManager.hasValidGrant("s1", "screen1", "fingerprint1", "dest", "hash2"))
+        assertFalse(ConfirmationManager.consumeConfirmation(id, "s2", "screen1", "fingerprint1", "dest", "hash"))
+        assertFalse(ConfirmationManager.consumeConfirmation(id, "s1", "screen2", "fingerprint1", "dest", "hash"))
+        assertFalse(ConfirmationManager.consumeConfirmation(id, "s1", "screen1", "fingerprint2", "dest", "hash"))
+        assertFalse(ConfirmationManager.consumeConfirmation(id, "s1", "screen1", "fingerprint1", "dest2", "hash"))
+        assertFalse(ConfirmationManager.consumeConfirmation(id, "s1", "screen1", "fingerprint1", "dest", "hash2"))
+        
+        // Ensure the grant wasn't destroyed
+        assertTrue(ConfirmationManager.hasValidGrant("s1", "screen1", "fingerprint1", "dest", "hash"))
     }
 }

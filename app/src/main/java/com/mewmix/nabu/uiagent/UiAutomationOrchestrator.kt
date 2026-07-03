@@ -110,8 +110,10 @@ class UiAutomationOrchestrator(
                     return@withTimeoutOrNull failure(decision.reason)
                 }
                 is UiPlanDecision.RequireConfirmation -> {
+                    onProgress("Confirm", "Verifying destination identity")
+                    val destination = extractDestination(observation.screen, goal)
                     val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
-                        requestConfirmation(describeConfirmation(action, decision.reason, observation.screen, goal))
+                        requestConfirmation(describeConfirmation(action, decision.reason, observation.screen, goal, destination))
                     } ?: false
                     
                     if (!userApproved) {
@@ -398,8 +400,11 @@ class UiAutomationOrchestrator(
         when (policyDecision) {
             is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
             is IntentPolicyDecision.RequireConfirmation -> {
+                onProgress("Confirm", "Verifying destination identity")
+                val destination = extractDestination(currentObservation.screen, goal)
                 val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
-                    requestConfirmation(describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal))
+                    val description = describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal, destination)
+                    requestConfirmation(description)
                 } ?: false
                 
                 if (!userApproved) {
@@ -412,19 +417,19 @@ class UiAutomationOrchestrator(
                 }
                 
                 currentObservation = latestObservation
-
+                
                 val fingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${currentObservation.screen.screenId}"
                 val contentHash = hashContent(action.toJson().toString(), goal)
                 val grantId = ConfirmationManager.requestConfirmation(
                     sessionId = sessionId,
                     screenId = currentObservation.screen.screenId,
                     actionFingerprint = fingerprint,
-                    destination = policyDecision.preview,
+                    destination = destination,
                     contentHash = contentHash,
                     timeoutMs = 120_000
                 )
                 
-                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, currentObservation.screen.screenId, fingerprint, policyDecision.preview, contentHash)) {
+                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, currentObservation.screen.screenId, fingerprint, destination, contentHash)) {
                     return failure("Confirmation expired or invalid.")
                 }
             }
@@ -587,7 +592,7 @@ class UiAutomationOrchestrator(
         }.toString()
     }
 
-    private fun describeConfirmation(action: UiActionStep, reason: String, screen: UiScreenState, goal: String): String {
+    private fun describeConfirmation(action: UiActionStep, reason: String, screen: UiScreenState, goal: String, destination: String?): String {
         val contextLines = screen.elements
             .filter { !it.editable && it.text?.isNotBlank() == true }
             .sortedBy { it.bounds?.top ?: 0 }
@@ -619,10 +624,33 @@ class UiAutomationOrchestrator(
             else -> ""
         }
         val contextStr = if (contextLines.isNotEmpty()) "\n\nContext:\n$contextLines" else ""
+        val destStr = if (!destination.isNullOrBlank() && destination != "UNKNOWN") "\n\nRecipient/Destination: $destination" else ""
         return if (details.isNotEmpty()) {
-            "$reason\n\nGoal: $goal$contextStr\n\nAction: ${action::class.simpleName}\n$details"
+            "$reason\n\nGoal: $goal$destStr$contextStr\n\nAction: ${action::class.simpleName}\n$details"
         } else {
-            "$reason\n\nGoal: $goal$contextStr\n\nAction: ${action::class.simpleName}"
+            "$reason\n\nGoal: $goal$destStr$contextStr\n\nAction: ${action::class.simpleName}"
+        }
+    }
+    
+    private suspend fun extractDestination(screen: UiScreenState, goal: String): String = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+        val elementsText = screen.elements.filter { !it.editable && it.text?.isNotBlank() == true }
+            .take(15)
+            .joinToString("\n") { it.text!! }
+        val prompt = """
+            Analyze this Android screen and extract the name of the current chat recipient or destination, if any. 
+            Goal: $goal
+            Screen: 
+            $elementsText
+            
+            Return ONLY the name, or UNKNOWN if unclear.
+        """.trimIndent()
+        val sb = StringBuilder()
+        backend.sendMessage(prompt) { partial, done ->
+            sb.append(partial)
+            if (done) {
+                val result = sb.toString().trim()
+                cont.resumeWith(Result.success(if (result.isBlank()) "UNKNOWN" else result))
+            }
         }
     }
 

@@ -42,14 +42,22 @@ object ConfirmationManager {
         destination: String?,
         contentHash: String?
     ): Boolean {
-        val grant = grants.remove(confirmationId) ?: return false
-        if (System.currentTimeMillis() > grant.expiresAtMs) return false
+        val grant = grants[confirmationId] ?: return false
+        if (System.currentTimeMillis() > grant.expiresAtMs) {
+            grants.remove(confirmationId)
+            return false
+        }
         
-        return grant.sessionId == sessionId &&
+        val isValid = grant.sessionId == sessionId &&
                grant.screenId == screenId &&
                grant.actionFingerprint == actionFingerprint &&
                grant.destination == destination &&
                grant.contentHash == contentHash
+               
+        if (isValid) {
+            grants.remove(confirmationId)
+        }
+        return isValid
     }
     
     fun hasValidGrant(

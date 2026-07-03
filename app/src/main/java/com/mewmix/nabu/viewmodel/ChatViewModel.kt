@@ -2425,7 +2425,9 @@ class ChatViewModel(
                     logger = DebugLogger::log
                 ).run(goal)
             } finally {
-                _orchestration.value = _orchestration.value?.copy(isVisible = true)
+                if (activeGenerationJob?.isActive == true) {
+                    _orchestration.value = _orchestration.value?.copy(isVisible = true)
+                }
                 _isUiAutomationActive.value = false
             }
         }
