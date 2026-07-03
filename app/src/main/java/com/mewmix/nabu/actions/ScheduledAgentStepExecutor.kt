@@ -205,6 +205,36 @@ object ScheduledAgentStepExecutor {
                 logger = { DebugLogger.log("Scheduled $it") }
             ).run(goal)
         }
+        if (call.toolName == "read_screen") {
+            val powerManager = context.getSystemService(PowerManager::class.java)
+            val keyguardManager = context.getSystemService(KeyguardManager::class.java)
+            if (powerManager?.isInteractive != true || keyguardManager?.isKeyguardLocked == true) {
+                return ToolResult(
+                    call.toolName,
+                    "Scheduled read_screen requires the device to be awake and unlocked.",
+                    true
+                )
+            }
+            if (!AccessibilityToolHandler.isEnabled()) {
+                return ToolResult(call.toolName, "Nabu Accessibility Service is not enabled.", true)
+            }
+            val xmlResult = AccessibilityToolHandler.execute(context, call)
+            if (xmlResult == null || xmlResult.isError) {
+                return xmlResult ?: ToolResult(call.toolName, "Failed to read screen", true)
+            }
+            return try {
+                val path = org.json.JSONObject(xmlResult.output).getString("path")
+                val file = java.io.File(path)
+                val content = if (file.exists()) file.readText() else "XML file missing."
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    if (file.exists()) file.delete()
+                }
+                ToolResult(call.toolName, content, false)
+            } catch (e: Exception) {
+                ToolResult(call.toolName, "Error reading screen XML: ${e.message}", true)
+            }
+        }
+        
         return ActionTools.execute(context, call) ?: ToolResult(
             toolName = call.toolName,
             output = "Tool '${call.toolName}' is unavailable.",

@@ -45,8 +45,8 @@ class NabuAccessibilityService : AccessibilityService() {
             accessibilityButtonController.registerAccessibilityButtonCallback(object : android.accessibilityservice.AccessibilityButtonController.AccessibilityButtonCallback() {
                 override fun onClicked(controller: android.accessibilityservice.AccessibilityButtonController) {
                     super.onClicked(controller)
-                    val intent = android.content.Intent(this@NabuAccessibilityService, com.mewmix.nabu.MainActivity::class.java).apply {
-                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    val intent = android.content.Intent(this@NabuAccessibilityService, com.mewmix.nabu.ChatActivity::class.java).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     }
                     startActivity(intent)
                 }
@@ -109,8 +109,7 @@ class NabuAccessibilityService : AccessibilityService() {
         return kotlinx.coroutines.runBlocking { deferred.await() }
     }
 
-    @RequiresApi(Build.VERSION_CODES.R)
-    fun observeUi(xmlPath: String, screenshotPath: String): JSONObject = synchronized(observationLock) {
+    fun observeUi(xmlPath: String, screenshotPath: String?): JSONObject = synchronized(observationLock) {
         val window = targetWindow() ?: throw IllegalStateException("No active application window is available.")
         val root = window.root ?: throw IllegalStateException("The active application window has no accessibility root.")
         val observationId = UUID.randomUUID().toString()
@@ -119,12 +118,15 @@ class NabuAccessibilityService : AccessibilityService() {
         if (!writeHierarchy(root, window, observationId, xmlPath)) {
             throw IllegalStateException("Failed to capture UI hierarchy.")
         }
-        if (!takeScreenshotToPath(screenshotPath)) {
-            throw IllegalStateException("Failed to capture screenshot.")
+        var actualScreenshotPath: String? = null
+        if (!screenshotPath.isNullOrBlank() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (takeScreenshotToPath(screenshotPath)) {
+                actualScreenshotPath = screenshotPath
+            }
         }
         lastObservationId = observationId
         lastObservedPackage = packageName
-        JSONObject()
+        val result = JSONObject()
             .put("schema_version", 2)
             .put("observation_id", observationId)
             .put("captured_at_ms", capturedAt)
@@ -133,7 +135,10 @@ class NabuAccessibilityService : AccessibilityService() {
             .put("rotation", runCatching { display?.rotation ?: 0 }.getOrDefault(0))
             .put("display_bounds", JSONArray(listOf(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)))
             .put("xml_path", xmlPath)
-            .put("screenshot_path", screenshotPath)
+        if (actualScreenshotPath != null) {
+            result.put("screenshot_path", actualScreenshotPath)
+        }
+        result
     }
 
     fun dumpScreenToXml(destPath: String): Boolean {
@@ -154,10 +159,28 @@ class NabuAccessibilityService : AccessibilityService() {
         val selector = params.optJSONObject("selector") ?: JSONObject()
         val target = findNode(root, selector)
         val success = when (action) {
-            "ui_tap" -> target?.let { performNodeAction(it, AccessibilityNodeInfo.ACTION_CLICK) }
-                ?: dispatchPointGesture(params, longPress = false)
-            "ui_long_press" -> target?.let { performNodeAction(it, AccessibilityNodeInfo.ACTION_LONG_CLICK) }
-                ?: dispatchPointGesture(params, longPress = true)
+            "ui_tap" -> {
+                val nodeSuccess = target?.let { performNodeAction(it, AccessibilityNodeInfo.ACTION_CLICK) } == true
+                if (nodeSuccess) {
+                    params.put("mechanism", "node")
+                    true
+                } else {
+                    val gestureSuccess = runCatching { dispatchPointGesture(params, longPress = false) }.getOrDefault(false)
+                    if (gestureSuccess) params.put("mechanism", "gesture")
+                    gestureSuccess
+                }
+            }
+            "ui_long_press" -> {
+                val nodeSuccess = target?.let { performNodeAction(it, AccessibilityNodeInfo.ACTION_LONG_CLICK) } == true
+                if (nodeSuccess) {
+                    params.put("mechanism", "node")
+                    true
+                } else {
+                    val gestureSuccess = runCatching { dispatchPointGesture(params, longPress = true) }.getOrDefault(false)
+                    if (gestureSuccess) params.put("mechanism", "gesture")
+                    gestureSuccess
+                }
+            }
             "ui_set_text" -> {
                 val text = params.optString("text")
                 require(text.isNotEmpty()) { "text is required." }
@@ -188,11 +211,15 @@ class NabuAccessibilityService : AccessibilityService() {
         }
         if (!success) throw IllegalStateException("Accessibility action '${action}' failed.")
         lastObservationId = null
-        JSONObject()
+        val result = JSONObject()
             .put("ok", true)
             .put("action", action)
             .put("observation_id", observationId)
             .put("package", currentPackage)
+        if (params.has("mechanism")) {
+            result.put("mechanism", params.getString("mechanism"))
+        }
+        result
     }
 
     private fun targetWindow(): AccessibilityWindowInfo? = windows.firstOrNull {

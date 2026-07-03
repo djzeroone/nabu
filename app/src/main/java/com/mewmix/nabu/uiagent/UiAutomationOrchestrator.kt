@@ -126,7 +126,9 @@ class UiAutomationOrchestrator(
     }
 
     private suspend fun observe(): Observation? {
-        val result = AccessibilityToolHandler.execute(context, ToolCall("observe_ui", emptyMap()))
+        val requestScreenshot = shouldAttachScreenshot(jsonRetry = false)
+        val args = mapOf("request_screenshot" to requestScreenshot)
+        val result = AccessibilityToolHandler.execute(context, ToolCall("observe_ui", args))
         if (result == null || result.isError) {
             logger("UiAutomation observe_ui failed: ${result?.output}")
             return null

@@ -38,7 +38,8 @@ object AccessibilityToolHandler {
             "observe_ui" -> {
                 val id = UUID.randomUUID().toString()
                 val xmlPath = File(context.cacheDir, "nabu_ui_$id.xml").absolutePath
-                val screenshotPath = File(context.cacheDir, "nabu_ui_$id.png").absolutePath
+                val requestScreenshot = call.arguments["request_screenshot"]?.toString()?.toBoolean() == true
+                val screenshotPath = if (requestScreenshot) File(context.cacheDir, "nabu_ui_$id.png").absolutePath else null
                 try {
                     val result = service.observeUi(xmlPath, screenshotPath)
                     ToolResult(call.toolName, result.toString(), false)
