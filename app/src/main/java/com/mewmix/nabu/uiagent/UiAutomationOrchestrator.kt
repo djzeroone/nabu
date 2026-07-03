@@ -110,19 +110,31 @@ class UiAutomationOrchestrator(
                     return failure(decision.reason)
                 }
                 is UiPlanDecision.RequireConfirmation -> {
-                    val grantId = ConfirmationManager.requestConfirmation(
-                        sessionId = sessionId,
-                        screenId = observation.screen.screenId,
-                        actionFingerprint = fingerprint,
-                        destination = null,
-                        contentHash = contentHash
-                    )
+                    val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
+                        requestConfirmation(describeConfirmation(action, decision.reason))
+                    } ?: false
                     
-                    if (!requestConfirmation(describeConfirmation(action, decision.reason))) {
-                        return failure("User denied UI action confirmation.")
+                    if (!userApproved) {
+                        return failure("User denied UI action confirmation or timed out.")
                     }
                     
-                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, observation.screen.screenId, fingerprint, null, contentHash)) {
+                    val latestObservation = observe() ?: return failure("Failed to re-observe screen for confirmation.")
+                    if (latestObservation.screen.screenId != observation.screen.screenId) {
+                        return failure("Screen changed while awaiting confirmation. Action aborted.")
+                    }
+
+                    val updatedFingerprint = "${actionLabel(action)}|${latestObservation.screen.screenId}"
+                    
+                    val grantId = ConfirmationManager.requestConfirmation(
+                        sessionId = sessionId,
+                        screenId = latestObservation.screen.screenId,
+                        actionFingerprint = updatedFingerprint,
+                        destination = null,
+                        contentHash = contentHash,
+                        timeoutMs = 120_000
+                    )
+                    
+                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, null, contentHash)) {
                         return failure("Confirmation expired or invalid.")
                     }
                 }
@@ -176,7 +188,8 @@ class UiAutomationOrchestrator(
                                 detail = result.output
                             )
                         )
-                        return result
+                        observation = observe() ?: return failure("UI action failed and screen could not be observed.")
+                        return@repeat
                     }
                 }
             }
