@@ -45,9 +45,7 @@ class NabuAccessibilityService : AccessibilityService() {
             accessibilityButtonController.registerAccessibilityButtonCallback(object : android.accessibilityservice.AccessibilityButtonController.AccessibilityButtonCallback() {
                 override fun onClicked(controller: android.accessibilityservice.AccessibilityButtonController) {
                     super.onClicked(controller)
-                    val intent = android.content.Intent(this@NabuAccessibilityService, com.mewmix.nabu.ChatActivity::class.java).apply {
-                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    }
+                    val intent = com.mewmix.nabu.ChatActivity.createGlobalTriggerIntent(this@NabuAccessibilityService)
                     startActivity(intent)
                 }
             })
@@ -262,8 +260,13 @@ class NabuAccessibilityService : AccessibilityService() {
             setAttribute("package", node.packageName?.toString().orEmpty())
             setAttribute("resource-id", node.viewIdResourceName.orEmpty())
             setAttribute("class", node.className?.toString().orEmpty())
-            setAttribute("text", node.text?.toString().orEmpty())
-            setAttribute("content-desc", node.contentDescription?.toString().orEmpty())
+            if (node.isPassword) {
+                setAttribute("text", "•".repeat(node.text?.length ?: 8))
+                setAttribute("content-desc", "•".repeat(node.contentDescription?.length ?: 8))
+            } else {
+                setAttribute("text", node.text?.toString().orEmpty())
+                setAttribute("content-desc", node.contentDescription?.toString().orEmpty())
+            }
             setAttribute("checkable", node.isCheckable.toString())
             setAttribute("checked", node.isChecked.toString())
             setAttribute("clickable", node.isClickable.toString())

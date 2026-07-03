@@ -16,9 +16,7 @@ class NabuTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val intent = Intent(this, com.mewmix.nabu.ChatActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
+        val intent = com.mewmix.nabu.ChatActivity.createGlobalTriggerIntent(this)
         startActivityAndCollapse(intent)
     }
 }

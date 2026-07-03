@@ -58,6 +58,9 @@ object AccessibilityToolHandler {
                 }
             }
             "take_screenshot" -> {
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+                    return ToolResult(call.toolName, "take_screenshot requires API 30+.", true)
+                }
                 val id = UUID.randomUUID().toString()
                 val screenshotPath = File(context.cacheDir, "nabu_ui_$id.png").absolutePath
                 if (service.takeScreenshotToPath(screenshotPath)) {

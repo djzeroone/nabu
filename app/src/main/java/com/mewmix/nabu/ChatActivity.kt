@@ -66,6 +66,12 @@ class ChatActivity : ComponentActivity() {
         const val EXTRA_LLM_N_BATCH = "llm_n_batch"
         const val EXTRA_LLM_TTFT_TIMEOUT_MS = "llm_ttft_timeout_ms"
         const val EXTRA_LLM_TOTAL_TIMEOUT_MS = "llm_total_timeout_ms"
+
+        fun createGlobalTriggerIntent(context: android.content.Context): Intent {
+            return Intent(context, ChatActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+        }
     }
 
     private val llmOverrides: LlmRuntimeOverrides? by lazy { readLlmOverrides(intent) }
