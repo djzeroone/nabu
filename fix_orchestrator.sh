@@ -1,3 +1,0 @@
-sed -i '' -e 's/val contentHash = action.hashCode().toString()/val contentHash = hashContent(action.toString(), goal)/g' app/src/main/java/com/mewmix/nabu/uiagent/UiAutomationOrchestrator.kt
-sed -i '' -e 's/describeConfirmation(action, decision.reason, observation.screen)/describeConfirmation(action, decision.reason, observation.screen, goal)/g' app/src/main/java/com/mewmix/nabu/uiagent/UiAutomationOrchestrator.kt
-sed -i '' -e 's/describeConfirmation(action, policyDecision.reason, currentObservation.screen)/describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal)/g' app/src/main/java/com/mewmix/nabu/uiagent/UiAutomationOrchestrator.kt

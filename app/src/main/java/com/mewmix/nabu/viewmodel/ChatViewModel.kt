@@ -1710,6 +1710,9 @@ class ChatViewModel(
         pendingUiActionConfirmationDeferred?.complete(false)
         pendingUiActionConfirmationDeferred = null
         _pendingUiActionConfirmation.value = null
+        _isLoading.value = false
+        _orchestration.value = _orchestration.value?.copy(isVisible = false)
+        _isUiAutomationActive.value = false
     }
 
     private fun refreshConversations(

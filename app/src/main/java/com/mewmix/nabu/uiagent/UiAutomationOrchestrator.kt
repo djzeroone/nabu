@@ -96,8 +96,8 @@ class UiAutomationOrchestrator(
             }
             
             val action = actionPlan.steps.first { it !is UiActionStep.Assert }
-            val fingerprint = "${actionLabel(action)}|${hashContent(action.toString(), goal)}|${observation.screen.screenId}"
-            val contentHash = hashContent(action.toString(), goal)
+            val fingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${observation.screen.screenId}"
+            val contentHash = hashContent(action.toJson().toString(), goal)
             
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
@@ -123,7 +123,7 @@ class UiAutomationOrchestrator(
                         return@withTimeoutOrNull failure("Screen changed while awaiting confirmation. Action aborted.")
                     }
 
-                    val updatedFingerprint = "${actionLabel(action)}|${hashContent(action.toString(), goal)}|${latestObservation.screen.screenId}"
+                    val updatedFingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${latestObservation.screen.screenId}"
                     
                     // Assign latest observation before proceeding
                     observation = latestObservation
@@ -413,8 +413,8 @@ class UiAutomationOrchestrator(
                 
                 currentObservation = latestObservation
 
-                val fingerprint = "${actionLabel(action)}|${hashContent(action.toString(), goal)}|${currentObservation.screen.screenId}"
-                val contentHash = hashContent(action.toString(), goal)
+                val fingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${currentObservation.screen.screenId}"
+                val contentHash = hashContent(action.toJson().toString(), goal)
                 val grantId = ConfirmationManager.requestConfirmation(
                     sessionId = sessionId,
                     screenId = currentObservation.screen.screenId,
@@ -588,6 +588,12 @@ class UiAutomationOrchestrator(
     }
 
     private fun describeConfirmation(action: UiActionStep, reason: String, screen: UiScreenState, goal: String): String {
+        val contextLines = screen.elements
+            .filter { !it.editable && it.text?.isNotBlank() == true }
+            .sortedBy { it.bounds?.top ?: 0 }
+            .take(3)
+            .joinToString("\n") { "> ${it.text}" }
+
         val details = when(action) {
             is UiActionStep.Tap -> {
                 val element = action.target.elementId?.let { screen.element(it) }
@@ -612,17 +618,20 @@ class UiAutomationOrchestrator(
             is UiActionStep.OpenCamera -> "Mode: ${action.mode.name}\nFacing: ${action.facing.name}"
             else -> ""
         }
+        val contextStr = if (contextLines.isNotEmpty()) "\n\nContext:\n$contextLines" else ""
         return if (details.isNotEmpty()) {
-            "$reason\n\nGoal: $goal\n\nAction: ${action::class.simpleName}\n$details"
+            "$reason\n\nGoal: $goal$contextStr\n\nAction: ${action::class.simpleName}\n$details"
         } else {
-            "$reason\n\nGoal: $goal\n\nAction: ${action::class.simpleName}"
+            "$reason\n\nGoal: $goal$contextStr\n\nAction: ${action::class.simpleName}"
         }
     }
 
     private fun hashContent(vararg inputs: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
         for (input in inputs) {
-            digest.update(input.toByteArray(Charsets.UTF_8))
+            val bytes = input.toByteArray(Charsets.UTF_8)
+            digest.update(java.nio.ByteBuffer.allocate(4).putInt(bytes.size).array())
+            digest.update(bytes)
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
