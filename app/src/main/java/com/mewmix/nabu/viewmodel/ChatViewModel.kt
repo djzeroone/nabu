@@ -935,6 +935,7 @@ class ChatViewModel(
     val isLoading = _isLoading.asStateFlow()
 
     private val _isInitializing = MutableStateFlow(false)
+    private var activeGenerationJob: kotlinx.coroutines.Job? = null
     val isInitializing = _isInitializing.asStateFlow()
 
     private val _pendingToolApproval = MutableStateFlow<ToolCall?>(null)
@@ -1368,7 +1369,7 @@ class ChatViewModel(
                 status = "Preparing action chain",
                 detail = trimmed
             )
-            viewModelScope.launch(Dispatchers.IO) {
+            activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
                 DebugLogger.log(
                     "ChatViewModel: executing direct action plan with " +
                         directActionPlan.toolCalls.joinToString(",") { it.toolName }
@@ -1414,7 +1415,7 @@ class ChatViewModel(
                 status = "Preparing tool call",
                 detail = trimmed
             )
-            viewModelScope.launch(Dispatchers.IO) {
+            activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
                 DebugLogger.log(
                     "ChatViewModel: executing direct tool command ${directToolCall.toolName} with ${directToolCall.arguments}"
                 )
@@ -1472,7 +1473,7 @@ class ChatViewModel(
         val conversationForModel = prepareConversationForModel(backendMaxTokens)
         val appContext = context.applicationContext
 
-        viewModelScope.launch(Dispatchers.IO) {
+        activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
             fun updateAssistantPlaceholder(content: String) {
                 viewModelScope.launch {
                     val last = _chatMessages.value.lastOrNull()
@@ -1704,6 +1705,11 @@ class ChatViewModel(
     fun cancelGeneration() {
         recordOrchestration("Cancel", "Stopping model and tool execution")
         llmBackend?.cancel()
+        activeGenerationJob?.cancel()
+        activeGenerationJob = null
+        pendingUiActionConfirmationDeferred?.complete(false)
+        pendingUiActionConfirmationDeferred = null
+        _pendingUiActionConfirmation.value = null
     }
 
     private fun refreshConversations(

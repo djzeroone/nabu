@@ -21,6 +21,7 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.security.MessageDigest
 import com.mewmix.nabu.actions.DeviceAction
 import java.util.UUID
 
@@ -68,15 +69,14 @@ class UiAutomationOrchestrator(
         var cumulativeWaitMs = 0L
         val actionHistory = mutableListOf<UiActionHistoryEntry>()
         val successfulFingerprints = mutableSetOf<String>()
+        val actionRepetitions = mutableMapOf<String, Int>()
 
-        repeat(budget.maxExecutedActions) { actionIndex ->
-            if (System.currentTimeMillis() - startTimeMs > budget.maxWallClockDurationMs) {
-                return failure("UI automation reached wall-clock time limit.")
-            }
+        val executionResult = kotlinx.coroutines.withTimeoutOrNull(budget.maxWallClockDurationMs) {
+            repeat(budget.maxExecutedActions) { actionIndex ->
             onProgress("Plan ${actionIndex + 1}", "Choosing the next UI action")
             
             var rawPlan = plan(goal, observation, actionHistory)
-                ?: return failure("The UI planner returned no usable plan.")
+                ?: return@withTimeoutOrNull failure("The UI planner returned no usable plan.")
             var parsedPlan = parsePlan(rawPlan, goal, observation)
             
             var retries = 0
@@ -85,45 +85,48 @@ class UiAutomationOrchestrator(
                 logger("UiAutomation planner parse failed: $errorMsg; output=${rawPlan.take(500)}")
                 onProgress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
                 rawPlan = plan(goal, observation, actionHistory, jsonRetry = true)
-                    ?: return failure("The UI planner returned no usable JSON after retry.")
+                    ?: return@withTimeoutOrNull failure("The UI planner returned no usable JSON after retry.")
                 parsedPlan = parsePlan(rawPlan, goal, observation)
                 retries++
             }
             
             val actionPlan = parsedPlan.getOrElse { error ->
                 logger("UiAutomation planner retry parse failed: ${error.message}; output=${rawPlan.take(500)}")
-                return failure("The UI planner returned invalid action JSON after retry: ${error.message}")
+                return@withTimeoutOrNull failure("The UI planner returned invalid action JSON after retry: ${error.message}")
             }
             
             val action = actionPlan.steps.first { it !is UiActionStep.Assert }
-            val fingerprint = "${actionLabel(action)}|${observation.screen.screenId}"
-            val contentHash = action.hashCode().toString()
+            val fingerprint = "${actionLabel(action)}|${hashContent(action.toString(), goal)}|${observation.screen.screenId}"
+            val contentHash = hashContent(action.toString(), goal)
             
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> {
                     logger("UiAutomation plan rejected: ${decision.reason}")
-                    return failure(decision.reason)
+                    return@withTimeoutOrNull failure(decision.reason)
                 }
                 is UiPlanDecision.Block -> {
                     logger("UiAutomation plan blocked: ${decision.reason}")
-                    return failure(decision.reason)
+                    return@withTimeoutOrNull failure(decision.reason)
                 }
                 is UiPlanDecision.RequireConfirmation -> {
                     val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
-                        requestConfirmation(describeConfirmation(action, decision.reason))
+                        requestConfirmation(describeConfirmation(action, decision.reason, observation.screen, goal))
                     } ?: false
                     
                     if (!userApproved) {
-                        return failure("User denied UI action confirmation or timed out.")
+                        return@withTimeoutOrNull failure("User denied UI action confirmation or timed out.")
                     }
                     
-                    val latestObservation = observe() ?: return failure("Failed to re-observe screen for confirmation.")
+                    val latestObservation = observe() ?: return@withTimeoutOrNull failure("Failed to re-observe screen for confirmation.")
                     if (latestObservation.screen.screenId != observation.screen.screenId) {
-                        return failure("Screen changed while awaiting confirmation. Action aborted.")
+                        return@withTimeoutOrNull failure("Screen changed while awaiting confirmation. Action aborted.")
                     }
 
-                    val updatedFingerprint = "${actionLabel(action)}|${latestObservation.screen.screenId}"
+                    val updatedFingerprint = "${actionLabel(action)}|${hashContent(action.toString(), goal)}|${latestObservation.screen.screenId}"
+                    
+                    // Assign latest observation before proceeding
+                    observation = latestObservation
                     
                     val grantId = ConfirmationManager.requestConfirmation(
                         sessionId = sessionId,
@@ -135,24 +138,45 @@ class UiAutomationOrchestrator(
                     )
                     
                     if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, null, contentHash)) {
-                        return failure("Confirmation expired or invalid.")
+                        return@withTimeoutOrNull failure("Confirmation expired or invalid.")
                     }
                 }
             }
             
+            val repCount = actionRepetitions.getOrDefault(fingerprint, 0)
             if (successfulFingerprints.contains(fingerprint) && unchangedCount > 0) {
-                logger("UiAutomation repetion detected: fingerprint=$fingerprint")
-                return failure("Planner proposed a repetitive action that already succeeded on this exact screen without changing it.")
+                if (repCount >= budget.maxIdenticalActionUnchangedScreen) {
+                    logger("UiAutomation repetion detected: fingerprint=$fingerprint")
+                    return@withTimeoutOrNull failure("Planner proposed a repetitive action that already succeeded on this exact screen without changing it.")
+                }
+                
+                logger("UiAutomation repetion warned: fingerprint=$fingerprint")
+                actionHistory.add(
+                    UiActionHistoryEntry(
+                        index = actionIndex,
+                        action = actionLabel(action),
+                        targetElementId = getTargetElementId(action),
+                        targetLabel = getTargetLabel(action, observation.screen),
+                        sourceScreenId = observation.screen.screenId,
+                        resultScreenId = observation.screen.screenId,
+                        outcome = Outcome.FAILED,
+                        changedScreen = false,
+                        detail = "Action proposed again after succeeding without changing the screen."
+                    )
+                )
+                actionRepetitions[fingerprint] = repCount + 1
+                observation = observe() ?: return@withTimeoutOrNull failure("Failed to re-observe after repetition.")
+                return@repeat
             }
 
             onProgress("Decision ${actionIndex + 1}", "Planner selected ${actionLabel(action)}")
             when (action) {
-                is UiActionStep.Done -> return success(action.summary)
-                is UiActionStep.AskUser -> return success("User input required: ${action.reason}")
+                is UiActionStep.Done -> return@withTimeoutOrNull success(action.summary)
+                is UiActionStep.AskUser -> return@withTimeoutOrNull success("User input required: ${action.reason}")
                 is UiActionStep.Wait -> {
                     val waitTime = action.milliseconds.coerceAtMost(budget.maxSingleWaitMs)
                     if (cumulativeWaitMs + waitTime > budget.maxCumulativeWaitMs) {
-                        return failure("Wait budget exceeded.")
+                        return@withTimeoutOrNull failure("Wait budget exceeded.")
                     }
                     cumulativeWaitMs += waitTime
                     delay(waitTime)
@@ -172,7 +196,7 @@ class UiAutomationOrchestrator(
                 }
                 else -> {
                     onProgress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
-                    val result = execute(action, observation, sessionId)
+                    val result = execute(action, observation, sessionId, goal)
                     if (result.isError) {
                         logger("UiAutomation execution failed action=${actionLabel(action)}: ${result.output}")
                         actionHistory.add(
@@ -188,17 +212,17 @@ class UiAutomationOrchestrator(
                                 detail = result.output
                             )
                         )
-                        observation = observe() ?: return failure("UI action failed and screen could not be observed.")
+                        observation = observe() ?: return@withTimeoutOrNull failure("UI action failed and screen could not be observed.")
                         return@repeat
                     }
                 }
             }
 
             onProgress("Verify ${actionIndex + 1}", "Observing the resulting screen")
-            val next = observe() ?: return failure("UI action ran, but the resulting screen could not be observed.")
+            val next = observe() ?: return@withTimeoutOrNull failure("UI action ran, but the resulting screen could not be observed.")
             val assertion = actionPlan.steps.filterIsInstance<UiActionStep.Assert>().lastOrNull()?.condition
             if (assertion != null && assertionMatches(assertion, next.screen)) {
-                return success("Completed UI goal: $goal")
+                return@withTimeoutOrNull success("Completed UI goal: $goal")
             }
 
             val changed = next.screen.screenId != observation.screen.screenId
@@ -226,11 +250,13 @@ class UiAutomationOrchestrator(
                     "screen=${observation.screen.screenId}->${next.screen.screenId} unchanged=$unchangedCount"
             )
             if (unchangedCount >= budget.maxUnchangedObservations) {
-                return failure("UI did not change after repeated actions; stopping automation.")
+                return@withTimeoutOrNull failure("UI did not change after repeated actions; stopping automation.")
             }
             observation = next
+            }
+            null
         }
-        return failure("UI action limit reached before the goal was verified.")
+        return executionResult ?: failure("UI automation reached wall-clock time limit.")
     }
 
     private suspend fun observe(): Observation? {
@@ -360,7 +386,7 @@ class UiAutomationOrchestrator(
         return keyguardManager?.isDeviceLocked == true
     }
 
-    private suspend fun execute(action: UiActionStep, observation: Observation, sessionId: String): ToolResult {
+    private suspend fun execute(action: UiActionStep, observation: Observation, sessionId: String, goal: String): ToolResult {
         val policyContext = PolicyContext(
             isScheduled = isScheduled,
             isDeviceLocked = isDeviceLocked(),
@@ -368,11 +394,12 @@ class UiAutomationOrchestrator(
             context = context
         )
         val policyDecision = AutomationIntentPolicy.evaluate(action, policyContext)
+        var currentObservation = observation
         when (policyDecision) {
             is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
             is IntentPolicyDecision.RequireConfirmation -> {
                 val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
-                    requestConfirmation(describeConfirmation(action, policyDecision.reason))
+                    requestConfirmation(describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal))
                 } ?: false
                 
                 if (!userApproved) {
@@ -380,45 +407,47 @@ class UiAutomationOrchestrator(
                 }
                 
                 val latestObservation = observe() ?: return failure("Failed to re-observe screen for confirmation.")
-                if (latestObservation.screen.screenId != observation.screen.screenId) {
+                if (latestObservation.screen.screenId != currentObservation.screen.screenId) {
                     return failure("Screen changed while awaiting confirmation. Action aborted.")
                 }
+                
+                currentObservation = latestObservation
 
-                val fingerprint = "${actionLabel(action)}|${latestObservation.screen.screenId}"
-                val contentHash = action.hashCode().toString()
+                val fingerprint = "${actionLabel(action)}|${hashContent(action.toString(), goal)}|${currentObservation.screen.screenId}"
+                val contentHash = hashContent(action.toString(), goal)
                 val grantId = ConfirmationManager.requestConfirmation(
                     sessionId = sessionId,
-                    screenId = latestObservation.screen.screenId,
+                    screenId = currentObservation.screen.screenId,
                     actionFingerprint = fingerprint,
                     destination = policyDecision.preview,
                     contentHash = contentHash,
                     timeoutMs = 120_000
                 )
                 
-                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, fingerprint, policyDecision.preview, contentHash)) {
+                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, currentObservation.screen.screenId, fingerprint, policyDecision.preview, contentHash)) {
                     return failure("Confirmation expired or invalid.")
                 }
             }
             is IntentPolicyDecision.Allow -> Unit
         }
 
-        val arguments = linkedMapOf<String, Any>("observation_id" to observation.bridgeObservationId)
+        val arguments = linkedMapOf<String, Any>("observation_id" to currentObservation.bridgeObservationId)
         val toolName = when (action) {
             is UiActionStep.Tap -> {
-                addTarget(arguments, action.target, observation.screen)
+                addTarget(arguments, action.target, currentObservation.screen)
                 "ui_tap"
             }
             is UiActionStep.LongPress -> {
-                addTarget(arguments, action.target, observation.screen)
+                addTarget(arguments, action.target, currentObservation.screen)
                 "ui_long_press"
             }
             is UiActionStep.TypeText -> {
-                action.target?.let { addTarget(arguments, it, observation.screen) }
+                action.target?.let { addTarget(arguments, it, currentObservation.screen) }
                 arguments["text"] = action.text
                 "ui_set_text"
             }
             is UiActionStep.Scroll -> {
-                action.target?.let { addTarget(arguments, it, observation.screen) }
+                action.target?.let { addTarget(arguments, it, currentObservation.screen) }
                 arguments["direction"] = action.direction.name.lowercase()
                 "ui_scroll"
             }
@@ -558,8 +587,24 @@ class UiAutomationOrchestrator(
         }.toString()
     }
 
-    private fun describeConfirmation(action: UiActionStep, reason: String): String {
+    private fun describeConfirmation(action: UiActionStep, reason: String, screen: UiScreenState, goal: String): String {
         val details = when(action) {
+            is UiActionStep.Tap -> {
+                val element = action.target.elementId?.let { screen.element(it) }
+                val label = element?.text?.takeIf(String::isNotBlank) ?: element?.contentDescription?.takeIf(String::isNotBlank)
+                val targetDesc = if (label != null) "Target: \"$label\"" else "Target: (unlabeled)"
+                val inputs = screen.elements.filter { it.editable && !it.text.isNullOrBlank() }
+                    .joinToString("\n") { "Input field contains: ${it.text}" }
+                if (inputs.isNotEmpty()) "$targetDesc\n$inputs" else targetDesc
+            }
+            is UiActionStep.LongPress -> {
+                val element = action.target.elementId?.let { screen.element(it) }
+                val label = element?.text?.takeIf(String::isNotBlank) ?: element?.contentDescription?.takeIf(String::isNotBlank)
+                val targetDesc = if (label != null) "Target: \"$label\"" else "Target: (unlabeled)"
+                val inputs = screen.elements.filter { it.editable && !it.text.isNullOrBlank() }
+                    .joinToString("\n") { "Input field contains: ${it.text}" }
+                if (inputs.isNotEmpty()) "$targetDesc\n$inputs" else targetDesc
+            }
             is UiActionStep.OpenApp -> "App: ${action.packageName}"
             is UiActionStep.OpenUrl -> "URL: ${action.url}"
             is UiActionStep.ShareText -> "Text: ${action.text}\nTarget Package: ${action.targetPackage ?: "Any"}"
@@ -568,10 +613,18 @@ class UiAutomationOrchestrator(
             else -> ""
         }
         return if (details.isNotEmpty()) {
-            "$reason\n\nAction: ${action::class.simpleName}\n$details"
+            "$reason\n\nGoal: $goal\n\nAction: ${action::class.simpleName}\n$details"
         } else {
-            "$reason\n\nAction: ${action::class.simpleName}"
+            "$reason\n\nGoal: $goal\n\nAction: ${action::class.simpleName}"
         }
+    }
+
+    private fun hashContent(vararg inputs: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        for (input in inputs) {
+            digest.update(input.toByteArray(Charsets.UTF_8))
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun extractJson(raw: String): String {
@@ -629,7 +682,7 @@ class UiAutomationOrchestrator(
                 }
               ]
             }
-            Allowed action values: tap, long_press, type_text, scroll, press_back, press_home, wait, ask_user, done.
+            Allowed action values: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera.
             Copy goal and screen_id exactly. Use only a supplied element id. Never use Markdown.
         """.trimIndent()
 
