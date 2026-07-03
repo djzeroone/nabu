@@ -16,6 +16,8 @@ import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CompletableDeferred
 import org.json.JSONArray
 import org.json.JSONObject
+import android.widget.Toast
+import kotlinx.coroutines.flow.asStateFlow
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import java.io.File
@@ -374,8 +376,14 @@ class NabuAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "NabuAccessibility"
 
+        private val _isConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val isConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _isConnected.asStateFlow()
+
         @Volatile
         var instance: NabuAccessibilityService? = null
-            private set
+            private set(value) {
+                field = value
+                _isConnected.value = value != null
+            }
     }
 }

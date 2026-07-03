@@ -233,22 +233,25 @@ object ScheduledAgentStepExecutor {
                 } else {
                     content = file.readText()
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 error = "Error reading screen XML: ${e.message}"
+            } finally {
+                var deleted = true
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    deleted = file?.takeIf { it.exists() }?.delete() ?: true
+                }
+                if (!deleted && error == null) {
+                    error = "Failed to delete XML cache file."
+                }
             }
 
-            var deleted = false
-            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                deleted = file?.takeIf { it.exists() }?.delete() ?: true
+            return if (error != null) {
+                ToolResult(call.toolName, error, true)
+            } else {
+                ToolResult(call.toolName, content!!, false)
             }
-
-            if (error != null) {
-                return ToolResult(call.toolName, error, true)
-            }
-            if (!deleted) {
-                return ToolResult(call.toolName, "Failed to delete XML cache file.", true)
-            }
-            return ToolResult(call.toolName, content!!, false)
         }
         
         return ActionTools.execute(context, call) ?: ToolResult(

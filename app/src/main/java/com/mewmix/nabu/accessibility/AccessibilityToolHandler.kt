@@ -24,6 +24,19 @@ object AccessibilityToolHandler {
         return NabuAccessibilityService.instance != null
     }
 
+    val TOOLS = listOf(
+        com.mewmix.nabu.tools.Tool(
+            name = "read_screen",
+            description = "Reads the visible UI structure (Accessibility node tree) of the device screen. Use this ONLY for inspecting the Android UI, NOT for reading files from storage.",
+            parameters = emptyMap()
+        ),
+        com.mewmix.nabu.tools.Tool(
+            name = "take_screenshot",
+            description = "Takes a screenshot of the current Android device screen. Use this ONLY to capture the device screen, NOT to take a photo using the camera.",
+            parameters = emptyMap()
+        )
+    )
+
     internal fun handles(toolName: String): Boolean = toolName in ACCESSIBILITY_TOOLS
 
     fun execute(context: Context, call: ToolCall): ToolResult? {

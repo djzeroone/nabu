@@ -38,12 +38,31 @@ class Phase0Tests {
         node.text = "secretpassword"
         node.contentDescription = "secretpassword_desc"
         node.isPassword = true
+
+        val service = NabuAccessibilityService()
+        val document = javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument()
+        val parent = document.createElement("hierarchy")
+        document.appendChild(parent)
+
+        val buildXmlTreeMethod = NabuAccessibilityService::class.java.getDeclaredMethod(
+            "buildXmlTree",
+            AccessibilityNodeInfo::class.java,
+            org.w3c.dom.Element::class.java,
+            org.w3c.dom.Document::class.java,
+            String::class.java
+        )
+        buildXmlTreeMethod.isAccessible = true
+        buildXmlTreeMethod.invoke(service, node, parent, document, "0")
+
+        val generatedNode = parent.firstChild as org.w3c.dom.Element
         
-        // Since buildXmlTree is private, we can't test it directly easily without reflection or exposing it.
-        // We'll trust the review, but we can verify our fix was applied by asserting node properties are correctly accessible
-        assertTrue(node.isPassword)
-        assertEquals("secretpassword", node.text)
-        assertEquals("secretpassword_desc", node.contentDescription)
+        assertEquals("android.widget.EditText", generatedNode.getAttribute("class"))
+        
+        val expectedTextRedaction = "•".repeat("secretpassword".length)
+        val expectedDescRedaction = "•".repeat("secretpassword_desc".length)
+        
+        assertEquals(expectedTextRedaction, generatedNode.getAttribute("text"))
+        assertEquals(expectedDescRedaction, generatedNode.getAttribute("content-desc"))
     }
 
 }

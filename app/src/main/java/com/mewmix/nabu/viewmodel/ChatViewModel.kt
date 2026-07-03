@@ -1101,9 +1101,17 @@ class ChatViewModel(
             }
             ActionTools.tools.forEach { ToolRegistry.register(it) }
 
-            // Initialize Nabu Accessibility tools if available
-            if (AccessibilityToolHandler.isEnabled()) {
-                DebugLogger.log("ChatViewModel: Accessibility tools available.")
+            // Observe Nabu Accessibility tools availability dynamically
+            viewModelScope.launch(Dispatchers.IO) {
+                com.mewmix.nabu.accessibility.NabuAccessibilityService.isConnected.collect { connected ->
+                    if (connected) {
+                        AccessibilityToolHandler.TOOLS.forEach { ToolRegistry.register(it) }
+                        DebugLogger.log("ChatViewModel: Accessibility tools registered dynamically.")
+                    } else {
+                        AccessibilityToolHandler.TOOLS.forEach { ToolRegistry.unregister(it.name) }
+                        DebugLogger.log("ChatViewModel: Accessibility tools unregistered.")
+                    }
+                }
             }
 
             // Initialize Glaive tools if available
