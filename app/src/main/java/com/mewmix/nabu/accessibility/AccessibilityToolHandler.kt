@@ -8,11 +8,26 @@ import java.io.File
 import java.util.UUID
 
 object AccessibilityToolHandler {
+    private val ACCESSIBILITY_TOOLS = setOf(
+        "observe_ui",
+        "read_screen",
+        "take_screenshot",
+        "read_ui_xml",
+        "ui_tap",
+        "ui_long_press",
+        "ui_set_text",
+        "ui_scroll",
+        "ui_global_action"
+    )
+
     fun isEnabled(): Boolean {
         return NabuAccessibilityService.instance != null
     }
 
+    internal fun handles(toolName: String): Boolean = toolName in ACCESSIBILITY_TOOLS
+
     fun execute(context: Context, call: ToolCall): ToolResult? {
+        if (!handles(call.toolName)) return null
         val service = NabuAccessibilityService.instance ?: return ToolResult(
             toolName = call.toolName,
             output = "Nabu Accessibility Service is not enabled.",
@@ -58,15 +73,6 @@ object AccessibilityToolHandler {
                     ToolResult(call.toolName, file.readText(), false)
                 } else {
                     ToolResult(call.toolName, "XML file not found at $path.", true)
-                }
-            }
-            "delete_file" -> {
-                val path = call.arguments["path"]?.toString() ?: return ToolResult(call.toolName, "Missing path argument.", true)
-                val file = File(path)
-                if (file.exists() && file.delete()) {
-                    ToolResult(call.toolName, "File deleted.", false)
-                } else {
-                    ToolResult(call.toolName, "Failed to delete file or file not found.", true)
                 }
             }
             "ui_tap", "ui_long_press", "ui_set_text", "ui_scroll", "ui_global_action" -> {

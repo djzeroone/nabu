@@ -148,6 +148,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".tools.GlaiveBridgeRelayActivity"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
 
 
         <receiver
@@ -177,6 +183,7 @@
 
         <service
             android:name=".accessibility.NabuAccessibilityService"
+            android:label="Nabu Accessibility Assistant"
             android:exported="true"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
