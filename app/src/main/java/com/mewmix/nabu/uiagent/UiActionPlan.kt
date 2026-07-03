@@ -21,6 +21,13 @@ sealed interface UiActionStep {
     data class Assert(val condition: UiAssertion) : UiActionStep
     data class AskUser(val reason: String) : UiActionStep
     data class Done(val summary: String) : UiActionStep
+    
+    // Typed Android Actions
+    data class OpenApp(val packageName: String) : UiActionStep
+    data class OpenSettingsPage(val page: SettingsPage) : UiActionStep
+    data class OpenUrl(val url: String) : UiActionStep
+    data class ShareText(val text: String, val targetPackage: String?) : UiActionStep
+    data class OpenCamera(val mode: CameraMode, val facing: CameraFacing) : UiActionStep
 }
 
 data class UiTarget(
@@ -30,6 +37,15 @@ data class UiTarget(
 )
 
 enum class ScrollDirection { UP, DOWN, LEFT, RIGHT }
+
+enum class SettingsPage {
+    WIFI, BLUETOOTH, DISPLAY, SOUND, ACCESSIBILITY, 
+    NOTIFICATION_SETTINGS, APP_DETAILS, DEVELOPER_OPTIONS, WIRELESS_DEBUGGING
+}
+
+enum class CameraMode { PHOTO, VIDEO }
+
+enum class CameraFacing { FRONT, REAR, UNSPECIFIED }
 
 data class UiAssertion(
     val elementId: String?,
@@ -72,24 +88,53 @@ object UiActionPlanParser {
         return UiActionPlan(goal, screenId, listOfNotNull(action, assertion))
     }
 
-    private fun parseStep(json: JsonObject): UiActionStep = when (normalizeAction(json.requiredString("action"), json)) {
-        "tap" -> UiActionStep.Tap(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
-        "long_press" -> UiActionStep.LongPress(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
-        "type_text" -> UiActionStep.TypeText(
-            text = json.requiredString("text"),
-            target = parseTarget(json.optJsonObject("target"))
-        )
-        "press_back" -> UiActionStep.PressBack
-        "press_home" -> UiActionStep.PressHome
-        "scroll" -> UiActionStep.Scroll(
-            direction = ScrollDirection.valueOf(json.requiredString("direction").uppercase()),
-            target = parseTarget(json.optJsonObject("target"))
-        )
-        "wait" -> UiActionStep.Wait(json.optLong("ms") ?: error("Missing ms."))
-        "assert" -> UiActionStep.Assert(parseAssertion(json.optJsonObject("condition")) ?: error("Missing or invalid condition."))
-        "ask_user" -> UiActionStep.AskUser(json.requiredString("reason"))
-        "done" -> UiActionStep.Done(json.requiredString("summary"))
-        else -> error("Unsupported UI action '${json.get("action")?.asString.orEmpty()}'.")
+    private fun checkKeys(json: JsonObject, vararg allowedKeys: String) {
+        val extraKeys = json.keySet() - allowedKeys.toSet()
+        require(extraKeys.isEmpty()) { "Unknown JSON fields in action '${json.get("action")?.asString}': $extraKeys" }
+    }
+
+    private fun parseStep(json: JsonObject): UiActionStep {
+        val actionName = normalizeAction(json.requiredString("action"), json)
+        return when (actionName) {
+            "tap" -> UiActionStep.Tap(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
+                .also { checkKeys(json, "action", "target") }
+            "long_press" -> UiActionStep.LongPress(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
+                .also { checkKeys(json, "action", "target") }
+            "type_text" -> UiActionStep.TypeText(
+                text = json.requiredString("text"),
+                target = parseTarget(json.optJsonObject("target"))
+            ).also { checkKeys(json, "action", "text", "target") }
+            "press_back" -> UiActionStep.PressBack.also { checkKeys(json, "action", "target", "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label") }
+            "press_home" -> UiActionStep.PressHome.also { checkKeys(json, "action", "target", "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label") }
+            "scroll" -> UiActionStep.Scroll(
+                direction = ScrollDirection.valueOf(json.requiredString("direction").uppercase()),
+                target = parseTarget(json.optJsonObject("target"))
+            ).also { checkKeys(json, "action", "direction", "target") }
+            "wait" -> UiActionStep.Wait(json.optLong("ms") ?: error("Missing ms."))
+                .also { checkKeys(json, "action", "ms") }
+            "assert" -> UiActionStep.Assert(parseAssertion(json.optJsonObject("condition")) ?: error("Missing or invalid condition."))
+                .also { checkKeys(json, "action", "condition") }
+            "ask_user" -> UiActionStep.AskUser(json.requiredString("reason"))
+                .also { checkKeys(json, "action", "reason") }
+            "done" -> UiActionStep.Done(json.requiredString("summary"))
+                .also { checkKeys(json, "action", "summary") }
+            "open_app" -> UiActionStep.OpenApp(json.requiredString("package_name"))
+                .also { checkKeys(json, "action", "package_name") }
+            "open_settings_page" -> UiActionStep.OpenSettingsPage(
+                SettingsPage.valueOf(json.requiredString("page").uppercase())
+            ).also { checkKeys(json, "action", "page") }
+            "open_url" -> UiActionStep.OpenUrl(json.requiredString("url"))
+                .also { checkKeys(json, "action", "url") }
+            "share_text" -> UiActionStep.ShareText(
+                text = json.requiredString("text"),
+                targetPackage = json.optionalString("target_package")
+            ).also { checkKeys(json, "action", "text", "target_package") }
+            "open_camera" -> UiActionStep.OpenCamera(
+                mode = CameraMode.valueOf(json.requiredString("mode").uppercase()),
+                facing = CameraFacing.valueOf(json.requiredString("facing").uppercase())
+            ).also { checkKeys(json, "action", "mode", "facing") }
+            else -> error("Unsupported UI action '$actionName'.")
+        }
     }
 
     private fun normalizeStepEnvelope(step: JsonObject): JsonObject {
@@ -158,7 +203,10 @@ object UiActionPlanParser {
 
     private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll")
     private val SUPPORTED_ACTIONS = TARGET_ACTIONS +
-        setOf("press_back", "press_home", "wait", "assert", "ask_user", "done")
+        setOf(
+            "press_back", "press_home", "wait", "assert", "ask_user", "done",
+            "open_app", "open_settings_page", "open_url", "share_text", "open_camera"
+        )
 
     private fun parseTarget(json: JsonObject?): UiTarget? {
         if (json == null) return null
@@ -168,6 +216,11 @@ object UiActionPlanParser {
         val bounds = json.optJsonArray("fallback_bounds")?.toBounds()
         val textContains = json.optionalString("text_contains") ?: json.optionalString("label")
         if (elementId == null && bounds == null && textContains == null) return null
+        
+        val allowedTargetKeys = setOf("element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label")
+        val extraTargetKeys = json.keySet() - allowedTargetKeys
+        require(extraTargetKeys.isEmpty()) { "Unknown JSON fields in target: $extraTargetKeys" }
+
         return UiTarget(elementId, bounds, textContains)
     }
 
@@ -177,6 +230,11 @@ object UiActionPlanParser {
         val textContains = json.optionalString("text_contains")
         val checked = json.optBoolean("checked")
         if (elementId == null && textContains == null && checked == null) return null
+
+        val allowedAssertionKeys = setOf("element_id", "text_contains", "checked")
+        val extraAssertionKeys = json.keySet() - allowedAssertionKeys
+        require(extraAssertionKeys.isEmpty()) { "Unknown JSON fields in assertion condition: $extraAssertionKeys" }
+
         return UiAssertion(elementId, textContains, checked)
     }
 

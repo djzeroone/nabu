@@ -21,12 +21,15 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import com.mewmix.nabu.actions.DeviceAction
+import java.util.UUID
 
 class UiAutomationOrchestrator(
     private val context: Context,
     private val backend: LlmBackend,
     private val requestConfirmation: suspend (String) -> Boolean,
     private val budget: AutomationBudget = AutomationBudget(),
+    private val isScheduled: Boolean = false,
     private val onProgress: (phase: String, detail: String) -> Unit = { _, _ -> },
     private val onModelOutput: (String) -> Unit = {},
     private val logger: (String) -> Unit = {}
@@ -43,8 +46,9 @@ class UiAutomationOrchestrator(
         if (!sessionMutex.tryLock()) {
             return failure("Automation session is already running. Please wait or cancel the existing session.")
         }
+        val sessionId = UUID.randomUUID().toString()
         return try {
-            runWithCleanup(goal)
+            runWithCleanup(goal, sessionId)
         } finally {
             withContext(NonCancellable) {
                 cleanupArtifacts(pendingArtifactPaths.toList())
@@ -53,7 +57,7 @@ class UiAutomationOrchestrator(
         }
     }
 
-    private suspend fun runWithCleanup(goal: String): ToolResult {
+    private suspend fun runWithCleanup(goal: String, sessionId: String): ToolResult {
         if (goal.isBlank()) return failure("UI automation goal is blank.")
         onProgress("Observe", "Capturing the active window and accessibility tree")
         delay(INITIAL_OBSERVATION_DELAY_MS)
@@ -91,6 +95,10 @@ class UiAutomationOrchestrator(
                 return failure("The UI planner returned invalid action JSON after retry: ${error.message}")
             }
             
+            val action = actionPlan.steps.first { it !is UiActionStep.Assert }
+            val fingerprint = "${actionLabel(action)}|${observation.screen.screenId}"
+            val contentHash = action.hashCode().toString()
+            
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> {
@@ -102,14 +110,23 @@ class UiAutomationOrchestrator(
                     return failure(decision.reason)
                 }
                 is UiPlanDecision.RequireConfirmation -> {
-                    if (!requestConfirmation(describeConfirmation(actionPlan, decision.reason))) {
+                    val grantId = ConfirmationManager.requestConfirmation(
+                        sessionId = sessionId,
+                        screenId = observation.screen.screenId,
+                        actionFingerprint = fingerprint,
+                        destination = null,
+                        contentHash = contentHash
+                    )
+                    
+                    if (!requestConfirmation(describeConfirmation(action, decision.reason))) {
                         return failure("User denied UI action confirmation.")
+                    }
+                    
+                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, observation.screen.screenId, fingerprint, null, contentHash)) {
+                        return failure("Confirmation expired or invalid.")
                     }
                 }
             }
-
-            val action = actionPlan.steps.first { it !is UiActionStep.Assert }
-            val fingerprint = "${actionLabel(action)}|${observation.screen.screenId}"
             
             if (successfulFingerprints.contains(fingerprint) && unchangedCount > 0) {
                 logger("UiAutomation repetion detected: fingerprint=$fingerprint")
@@ -143,7 +160,7 @@ class UiAutomationOrchestrator(
                 }
                 else -> {
                     onProgress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
-                    val result = execute(action, observation)
+                    val result = execute(action, observation, sessionId)
                     if (result.isError) {
                         logger("UiAutomation execution failed action=${actionLabel(action)}: ${result.output}")
                         actionHistory.add(
@@ -325,7 +342,43 @@ class UiAutomationOrchestrator(
         return backend !is LiteRtLmBackend && !backend.runtimeDescription().startsWith("LITERT-LM")
     }
 
-    private suspend fun execute(action: UiActionStep, observation: Observation): ToolResult {
+    private fun isDeviceLocked(): Boolean {
+        val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        return keyguardManager?.isDeviceLocked == true
+    }
+
+    private suspend fun execute(action: UiActionStep, observation: Observation, sessionId: String): ToolResult {
+        val policyContext = PolicyContext(
+            isScheduled = isScheduled,
+            isDeviceLocked = isDeviceLocked(),
+            destinationProvenance = "planner",
+            context = context
+        )
+        val policyDecision = AutomationIntentPolicy.evaluate(action, policyContext)
+        when (policyDecision) {
+            is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
+            is IntentPolicyDecision.RequireConfirmation -> {
+                val fingerprint = "${actionLabel(action)}|${observation.screen.screenId}"
+                val contentHash = action.hashCode().toString()
+                val grantId = ConfirmationManager.requestConfirmation(
+                    sessionId = sessionId,
+                    screenId = observation.screen.screenId,
+                    actionFingerprint = fingerprint,
+                    destination = policyDecision.preview,
+                    contentHash = contentHash
+                )
+                
+                if (!requestConfirmation(describeConfirmation(action, policyDecision.reason))) {
+                    return failure("User denied UI action confirmation.")
+                }
+                
+                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, observation.screen.screenId, fingerprint, policyDecision.preview, contentHash)) {
+                    return failure("Confirmation expired or invalid.")
+                }
+            }
+            is IntentPolicyDecision.Allow -> Unit
+        }
+
         val arguments = linkedMapOf<String, Any>("observation_id" to observation.bridgeObservationId)
         val toolName = when (action) {
             is UiActionStep.Tap -> {
@@ -353,6 +406,30 @@ class UiAutomationOrchestrator(
             UiActionStep.PressHome -> {
                 arguments["global_action"] = "home"
                 "ui_global_action"
+            }
+            is UiActionStep.OpenApp -> {
+                val result = DeviceAction.openApp(context, action.packageName, "")
+                return if (result.isError) failure(result.message) else success(result.message)
+            }
+            is UiActionStep.OpenSettingsPage -> {
+                val result = DeviceAction.openSettingsPage(context, action.page.name, null)
+                return if (result.isError) failure(result.message) else success(result.message)
+            }
+            is UiActionStep.OpenUrl -> {
+                val result = DeviceAction.openUrl(context, action.url)
+                return if (result.isError) failure(result.message) else success(result.message)
+            }
+            is UiActionStep.ShareText -> {
+                val result = DeviceAction.shareText(context, action.text, "")
+                return if (result.isError) failure(result.message) else success(result.message)
+            }
+            is UiActionStep.OpenCamera -> {
+                val result = if (action.mode == CameraMode.VIDEO) {
+                    DeviceAction.recordVideo(context)
+                } else {
+                    DeviceAction.takePhoto(context)
+                }
+                return if (result.isError) failure(result.message) else success(result.message)
             }
             else -> return failure("Unsupported executable UI action.")
         }
@@ -446,8 +523,8 @@ class UiAutomationOrchestrator(
         }.toString()
     }
 
-    private fun describeConfirmation(plan: UiActionPlan, reason: String): String =
-        "$reason\n\nGoal: ${plan.goal}\nAction: ${plan.steps.first { it !is UiActionStep.Assert }::class.simpleName}"
+    private fun describeConfirmation(action: UiActionStep, reason: String): String =
+        "$reason\n\nAction: ${action::class.simpleName}"
 
     private fun extractJson(raw: String): String {
         val trimmed = raw.trim()
@@ -475,6 +552,11 @@ class UiAutomationOrchestrator(
         is UiActionStep.Assert -> "assert"
         is UiActionStep.AskUser -> "ask user"
         is UiActionStep.Done -> "done"
+        is UiActionStep.OpenApp -> "open app ${action.packageName}"
+        is UiActionStep.OpenSettingsPage -> "open settings ${action.page.name.lowercase()}"
+        is UiActionStep.OpenUrl -> "open url"
+        is UiActionStep.ShareText -> "share text"
+        is UiActionStep.OpenCamera -> "open camera"
     }
 
     companion object {
@@ -519,7 +601,17 @@ class UiAutomationOrchestrator(
         is UiActionStep.LongPress -> action.target.elementId
         is UiActionStep.TypeText -> action.target?.elementId
         is UiActionStep.Scroll -> action.target?.elementId
-        else -> null
+        is UiActionStep.OpenApp,
+        is UiActionStep.OpenSettingsPage,
+        is UiActionStep.OpenUrl,
+        is UiActionStep.ShareText,
+        is UiActionStep.OpenCamera,
+        is UiActionStep.PressBack,
+        is UiActionStep.PressHome,
+        is UiActionStep.Wait,
+        is UiActionStep.AskUser,
+        is UiActionStep.Done,
+        is UiActionStep.Assert -> null
     }
 
     private fun getTargetLabel(action: UiActionStep, screen: UiScreenState): String? {

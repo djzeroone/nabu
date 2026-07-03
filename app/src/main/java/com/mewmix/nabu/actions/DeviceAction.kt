@@ -144,6 +144,34 @@ object DeviceAction {
             "Opened $label."
         }
     }
+    
+    fun openSettingsPage(context: Context, page: String, packageName: String? = null): ActionResult {
+        val action = when (page.uppercase()) {
+            "WIFI" -> Settings.ACTION_WIFI_SETTINGS
+            "BLUETOOTH" -> Settings.ACTION_BLUETOOTH_SETTINGS
+            "DISPLAY" -> Settings.ACTION_DISPLAY_SETTINGS
+            "SOUND" -> Settings.ACTION_SOUND_SETTINGS
+            "ACCESSIBILITY" -> Settings.ACTION_ACCESSIBILITY_SETTINGS
+            "NOTIFICATION_SETTINGS" -> Settings.ACTION_APP_NOTIFICATION_SETTINGS
+            "APP_DETAILS" -> Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+            "DEVELOPER_OPTIONS" -> Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS
+            "WIRELESS_DEBUGGING" -> "android.settings.WIRELESS_DEBUGGING_SETTINGS"
+            else -> return ActionResult("Unsupported settings page: $page", true)
+        }
+        val intent = Intent(action).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        
+        if (action == Settings.ACTION_APPLICATION_DETAILS_SETTINGS || action == Settings.ACTION_APP_NOTIFICATION_SETTINGS) {
+            if (packageName.isNullOrBlank()) {
+                return ActionResult("Package name is required for $page settings.", true)
+            }
+            intent.data = Uri.parse("package:$packageName")
+        }
+        
+        if (!canResolveIntent(context, intent)) {
+            return ActionResult("Settings page '$page' is not available on this device.", true)
+        }
+        return launchIntent(context, intent) { "Opened $page settings." }
+    }
 
     fun findAppCandidates(context: Context, appName: String): List<AppCandidate> =
         appCandidateResolver(context, appName)

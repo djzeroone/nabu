@@ -74,6 +74,11 @@ object UiActionValidator {
         is UiActionStep.AskUser -> if (step.reason.isBlank()) UiPlanDecision.Invalid("ask_user requires a reason.") else null
         is UiActionStep.Done -> if (step.summary.isBlank()) UiPlanDecision.Invalid("done requires a summary.") else null
         UiActionStep.PressBack, UiActionStep.PressHome -> null
+        is UiActionStep.OpenApp,
+        is UiActionStep.OpenSettingsPage,
+        is UiActionStep.OpenUrl,
+        is UiActionStep.ShareText,
+        is UiActionStep.OpenCamera -> null
     }
 
     private fun validateTarget(
