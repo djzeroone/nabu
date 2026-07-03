@@ -6,7 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.content.Intent
 import android.provider.Settings
-import android.content.ComponentName
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -32,7 +32,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.mewmix.nabu.tools.GlaiveBridge
 import com.mewmix.nabu.ui.brutalist.Brutal
 import com.mewmix.nabu.ui.brutalist.BrutalButton
 import com.mewmix.nabu.ui.brutalist.BrutalButtonText
@@ -69,8 +68,6 @@ fun OptionalPermissionsSection(
     val contactsPermission = optionalContactsPermission()
     val mediaPermission = optionalMediaPermission()
     val microphonePermission = optionalMicrophonePermission()
-
-    val glaiveInstalled = remember { GlaiveBridge.isInstalled(context) }
     
     var status by remember {
         mutableStateOf(
@@ -79,8 +76,7 @@ fun OptionalPermissionsSection(
                 notificationPermission,
                 contactsPermission,
                 mediaPermission,
-                microphonePermission,
-                glaiveInstalled
+                microphonePermission
             )
         )
     }
@@ -88,25 +84,25 @@ fun OptionalPermissionsSection(
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission, glaiveInstalled)
+        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission)
     }
 
     val contactsPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission, glaiveInstalled)
+        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission)
     }
 
     val mediaPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission, glaiveInstalled)
+        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission)
     }
 
     val microphonePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission, glaiveInstalled)
+        status = PermissionReviewStatus.from(context, notificationPermission, contactsPermission, mediaPermission, microphonePermission)
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -117,8 +113,7 @@ fun OptionalPermissionsSection(
                     notificationPermission,
                     contactsPermission,
                     mediaPermission,
-                    microphonePermission,
-                    glaiveInstalled
+                    microphonePermission
                 )
             }
         }
@@ -137,6 +132,35 @@ fun OptionalPermissionsSection(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
+
+        PermissionRow(
+            title = "Nabu Screen Control",
+            description = "Enable Nabu UI Automation in Android Accessibility Settings so Nabu can see and interact with your screen on your behalf.",
+            statusLabel = status.nabuA11yStatus,
+            actionLabel = if (status.nabuA11yGranted) "Enabled" else "Enable",
+            enabled = !status.nabuA11yGranted,
+            onClick = {
+                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                context.startActivity(intent)
+            }
+        )
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PermissionRow(
+                title = "Display Over Other Apps",
+                description = "Enable 'Display over other apps' so Nabu can show its assistant UI while you use other apps.",
+                statusLabel = status.overlayStatus,
+                actionLabel = if (status.overlayGranted) "Granted" else "Grant",
+                enabled = !status.overlayGranted,
+                onClick = {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    )
+                    context.startActivity(intent)
+                }
+            )
+        }
 
         PermissionRow(
             title = "Notifications",
@@ -181,20 +205,6 @@ fun OptionalPermissionsSection(
                 microphonePermission?.let(microphonePermissionLauncher::launch)
             }
         )
-
-        if (glaiveInstalled) {
-            PermissionRow(
-                title = "Glaive Screen Control",
-                description = "Enable Glaive in Android Accessibility Settings so Nabu can see and interact with your screen.",
-                statusLabel = status.glaiveA11yStatus,
-                actionLabel = if (status.glaiveA11yGranted) "Enabled" else "Enable",
-                enabled = !status.glaiveA11yGranted,
-                onClick = {
-                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                    context.startActivity(intent)
-                }
-            )
-        }
 
         Text(
             text = "Missing permissions do not block startup. They only limit the related features.",
@@ -263,12 +273,14 @@ private data class PermissionReviewStatus(
     val contactsGranted: Boolean,
     val mediaGranted: Boolean,
     val microphoneGranted: Boolean,
-    val glaiveA11yGranted: Boolean,
+    val nabuA11yGranted: Boolean,
+    val overlayGranted: Boolean,
     val notificationStatus: String,
     val contactsStatus: String,
     val mediaStatus: String,
     val microphoneStatus: String,
-    val glaiveA11yStatus: String
+    val nabuA11yStatus: String,
+    val overlayStatus: String
 ) {
     companion object {
         fun from(
@@ -276,8 +288,7 @@ private data class PermissionReviewStatus(
             notificationPermission: String?,
             contactsPermission: String?,
             mediaPermission: String?,
-            microphonePermission: String?,
-            glaiveInstalled: Boolean
+            microphonePermission: String?
         ): PermissionReviewStatus {
             val notificationsGranted = notificationPermission == null ||
                 ContextCompat.checkSelfPermission(context, notificationPermission) == PackageManager.PERMISSION_GRANTED
@@ -288,10 +299,13 @@ private data class PermissionReviewStatus(
             val microphoneGranted = microphonePermission == null ||
                 ContextCompat.checkSelfPermission(context, microphonePermission) == PackageManager.PERMISSION_GRANTED
 
-            var glaiveA11yGranted = false
-            if (glaiveInstalled) {
-                val enabledServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-                glaiveA11yGranted = enabledServices?.contains("com.mewmix.glaive/com.mewmix.glaive.core.GlaiveAccessibilityService") == true
+            val enabledServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            val nabuA11yGranted = enabledServices?.contains("${context.packageName}/com.mewmix.nabu.accessibility.NabuAccessibilityService") == true
+
+            val overlayGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Settings.canDrawOverlays(context)
+            } else {
+                true
             }
 
             return PermissionReviewStatus(
@@ -299,7 +313,8 @@ private data class PermissionReviewStatus(
                 contactsGranted = contactsGranted,
                 mediaGranted = mediaGranted,
                 microphoneGranted = microphoneGranted,
-                glaiveA11yGranted = glaiveA11yGranted,
+                nabuA11yGranted = nabuA11yGranted,
+                overlayGranted = overlayGranted,
                 notificationStatus = if (notificationPermission == null) {
                     "Not required on this Android version."
                 } else if (notificationsGranted) {
@@ -328,12 +343,15 @@ private data class PermissionReviewStatus(
                 } else {
                     "Not granted."
                 },
-                glaiveA11yStatus = if (!glaiveInstalled) {
-                    "Glaive not installed."
-                } else if (glaiveA11yGranted) {
+                nabuA11yStatus = if (nabuA11yGranted) {
                     "Enabled."
                 } else {
                     "Requires Accessibility Service to be enabled."
+                },
+                overlayStatus = if (overlayGranted) {
+                    "Granted."
+                } else {
+                    "Not granted."
                 }
             )
         }

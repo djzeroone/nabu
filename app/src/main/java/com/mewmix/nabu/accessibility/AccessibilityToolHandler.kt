@@ -1,0 +1,84 @@
+package com.mewmix.nabu.accessibility
+
+import android.content.Context
+import com.mewmix.nabu.tools.ToolCall
+import com.mewmix.nabu.tools.ToolResult
+import org.json.JSONObject
+import java.io.File
+import java.util.UUID
+
+object AccessibilityToolHandler {
+    fun isEnabled(): Boolean {
+        return NabuAccessibilityService.instance != null
+    }
+
+    fun execute(context: Context, call: ToolCall): ToolResult? {
+        val service = NabuAccessibilityService.instance ?: return ToolResult(
+            toolName = call.toolName,
+            output = "Nabu Accessibility Service is not enabled.",
+            isError = true
+        )
+
+        return when (call.toolName) {
+            "observe_ui" -> {
+                val id = UUID.randomUUID().toString()
+                val xmlPath = File(context.cacheDir, "nabu_ui_$id.xml").absolutePath
+                val screenshotPath = File(context.cacheDir, "nabu_ui_$id.png").absolutePath
+                try {
+                    val result = service.observeUi(xmlPath, screenshotPath)
+                    ToolResult(call.toolName, result.toString(), false)
+                } catch (e: Exception) {
+                    ToolResult(call.toolName, "Error: ${e.message}", true)
+                }
+            }
+            "read_screen" -> {
+                val id = UUID.randomUUID().toString()
+                val xmlPath = File(context.cacheDir, "nabu_ui_$id.xml").absolutePath
+                if (service.dumpScreenToXml(xmlPath)) {
+                    val result = JSONObject().put("path", xmlPath)
+                    ToolResult(call.toolName, result.toString(), false)
+                } else {
+                    ToolResult(call.toolName, "Failed to capture screen XML.", true)
+                }
+            }
+            "take_screenshot" -> {
+                val id = UUID.randomUUID().toString()
+                val screenshotPath = File(context.cacheDir, "nabu_ui_$id.png").absolutePath
+                if (service.takeScreenshotToPath(screenshotPath)) {
+                    val result = JSONObject().put("path", screenshotPath)
+                    ToolResult(call.toolName, result.toString(), false)
+                } else {
+                    ToolResult(call.toolName, "Failed to capture screenshot.", true)
+                }
+            }
+            "read_ui_xml" -> {
+                val path = call.arguments["path"]?.toString() ?: return ToolResult(call.toolName, "Missing path argument.", true)
+                val file = File(path)
+                if (file.exists()) {
+                    ToolResult(call.toolName, file.readText(), false)
+                } else {
+                    ToolResult(call.toolName, "XML file not found at $path.", true)
+                }
+            }
+            "delete_file" -> {
+                val path = call.arguments["path"]?.toString() ?: return ToolResult(call.toolName, "Missing path argument.", true)
+                val file = File(path)
+                if (file.exists() && file.delete()) {
+                    ToolResult(call.toolName, "File deleted.", false)
+                } else {
+                    ToolResult(call.toolName, "Failed to delete file or file not found.", true)
+                }
+            }
+            "ui_tap", "ui_long_press", "ui_set_text", "ui_scroll", "ui_global_action" -> {
+                try {
+                    val params = JSONObject(call.arguments)
+                    val result = service.performUiAction(call.toolName, params)
+                    ToolResult(call.toolName, result.toString(), false)
+                } catch (e: Exception) {
+                    ToolResult(call.toolName, "Error: ${e.message}", true)
+                }
+            }
+            else -> null
+        }
+    }
+}

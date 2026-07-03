@@ -10,7 +10,7 @@ import com.mewmix.nabu.chat.LlmMessage
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolCallProtocol
 import com.mewmix.nabu.tools.ToolResult
-import com.mewmix.nabu.tools.GlaiveBridge
+import com.mewmix.nabu.accessibility.AccessibilityToolHandler
 import com.mewmix.nabu.uiagent.UiAutomationOrchestrator
 import com.mewmix.nabu.utils.DebugLogger
 import kotlinx.coroutines.CompletableDeferred
@@ -195,8 +195,8 @@ object ScheduledAgentStepExecutor {
                     true
                 )
             }
-            if (!GlaiveBridge.isInstalled(context)) {
-                return ToolResult(call.toolName, "Glaive is not installed.", true)
+            if (!AccessibilityToolHandler.isEnabled()) {
+                return ToolResult(call.toolName, "Nabu Accessibility Service is not enabled.", true)
             }
             return UiAutomationOrchestrator(
                 context = context,

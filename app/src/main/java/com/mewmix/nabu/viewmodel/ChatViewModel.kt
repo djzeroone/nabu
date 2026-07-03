@@ -53,6 +53,7 @@ import com.mewmix.nabu.utils.filterToAvailableStyles
 import com.mewmix.nabu.utils.mixStyles
 import com.mewmix.nabu.utils.normalized
 import com.mewmix.nabu.utils.toConfig
+import com.mewmix.nabu.accessibility.AccessibilityToolHandler
 import com.mewmix.nabu.tools.GlaiveBridge
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolCallProtocol
@@ -1099,6 +1100,11 @@ class ChatViewModel(
                 DebugLogger.log("ChatViewModel: TTS disabled; skipping runtime initialization")
             }
             ActionTools.tools.forEach { ToolRegistry.register(it) }
+
+            // Initialize Nabu Accessibility tools if available
+            if (AccessibilityToolHandler.isEnabled()) {
+                DebugLogger.log("ChatViewModel: Accessibility tools available.")
+            }
 
             // Initialize Glaive tools if available
             if (GlaiveBridge.isInstalled(context.applicationContext)) {
@@ -2407,20 +2413,34 @@ class ChatViewModel(
             }
         }
         ActionTools.execute(appContext, effectiveToolCall)?.let { return it }
-        if (!GlaiveBridge.isInstalled(appContext)) {
+
+        var baseResult = AccessibilityToolHandler.execute(appContext, effectiveToolCall)
+        
+        if (baseResult == null) {
+            // Not an accessibility tool, try Glaive
+            if (!GlaiveBridge.isInstalled(appContext)) {
+                return ToolResult(
+                    toolName = effectiveToolCall.toolName,
+                    output = "Glaive is not installed, required for file tools.",
+                    isError = true
+                )
+            }
+            baseResult = withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
+                GlaiveBridge.executeTool(appContext, effectiveToolCall)
+            }
+        }
+
+        if (baseResult == null) {
             return ToolResult(
                 toolName = effectiveToolCall.toolName,
-                output = "Glaive is not installed.",
+                output = "Tool '${effectiveToolCall.toolName}' timed out after ${TOOL_EXECUTION_TIMEOUT_MS / 1000}s.",
                 isError = true
             )
         }
-        val baseResult = withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
-            GlaiveBridge.executeTool(appContext, effectiveToolCall)
-        } ?: ToolResult(
-            toolName = effectiveToolCall.toolName,
-            output = "Tool '${effectiveToolCall.toolName}' timed out after ${TOOL_EXECUTION_TIMEOUT_MS / 1000}s.",
-            isError = true
-        )
+
+        if (baseResult.isError && baseResult.output.contains("Nabu Accessibility Service is not enabled")) {
+             return baseResult
+        }
 
         if ((toolCall.toolName == "search_files" || toolCall.toolName == "list_files") && !baseResult.isError) {
             val lines = baseResult.output.split("\n")
@@ -2442,14 +2462,14 @@ class ChatViewModel(
         if (effectiveToolCall.toolName == "read_screen" && !baseResult.isError) {
             val path = runCatching { JSONObject(baseResult.output).optString("path") }.getOrDefault("")
             if (path.isNotBlank()) {
-                val xmlResult = GlaiveBridge.executeTool(
+                val xmlResult = AccessibilityToolHandler.execute(
                     appContext,
                     ToolCall("read_ui_xml", mapOf("path" to path))
                 )
-                if (!xmlResult.isError) {
+                if (xmlResult != null && !xmlResult.isError) {
                     return baseResult.copy(output = xmlResult.output)
                 }
-                return xmlResult.copy(toolName = "read_screen")
+                return xmlResult?.copy(toolName = "read_screen") ?: ToolResult("read_screen", "Unknown error", true)
             }
         }
         if (toolCall.toolName == "take_screenshot" && !baseResult.isError) {

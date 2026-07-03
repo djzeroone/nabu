@@ -3,4 +3,5 @@
     <string name="shortcut_voice_short">Voice</string>
     <string name="shortcut_voice_long">Nabu Voice Assistant</string>
     <string name="widget_voice_label">Nabu Voice</string>
+    <string name="accessibility_service_description">Nabu UI Automation</string>
 </resources>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.mewmix.nabu.assistant.NabuVoiceInteractionSessionService"
+    android:recognitionService="com.mewmix.nabu.assistant.NabuRecognitionService"
+    android:settingsActivity="com.mewmix.nabu.MainActivity"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true"
+    android:supportsLocalInteraction="true" />

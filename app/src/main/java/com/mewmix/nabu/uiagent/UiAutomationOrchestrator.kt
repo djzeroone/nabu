@@ -8,7 +8,7 @@ import com.mewmix.nabu.chat.LlmBackend
 import com.mewmix.nabu.chat.LlmImageInput
 import com.mewmix.nabu.chat.LlmMessage
 import com.mewmix.nabu.chat.LiteRtLmBackend
-import com.mewmix.nabu.tools.GlaiveBridge
+import com.mewmix.nabu.accessibility.AccessibilityToolHandler
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
@@ -50,19 +50,20 @@ class UiAutomationOrchestrator(
         if (goal.isBlank()) return failure("UI automation goal is blank.")
         onProgress("Observe", "Capturing the active window and accessibility tree")
         delay(INITIAL_OBSERVATION_DELAY_MS)
-        var observation = observe() ?: return failure("Unable to observe the current UI through Glaive.")
+        var observation = observe() ?: return failure("Unable to observe the current UI through the Accessibility Service.")
         var unchangedCount = 0
+        val actionHistory = mutableListOf<String>()
 
         repeat(MAX_ACTIONS) { actionIndex ->
             onProgress("Plan ${actionIndex + 1}", "Choosing the next UI action")
-            var rawPlan = plan(goal, observation)
+            var rawPlan = plan(goal, observation, actionHistory)
                 ?: return failure("The UI planner returned no usable plan.")
             var parsedPlan = parsePlan(rawPlan, goal, observation)
             if (parsedPlan.isFailure) {
                 val firstError = parsedPlan.exceptionOrNull()
                 logger("UiAutomation planner parse failed: ${firstError?.message}; output=${rawPlan.take(500)}")
                 onProgress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
-                rawPlan = plan(goal, observation, jsonRetry = true)
+                rawPlan = plan(goal, observation, actionHistory, jsonRetry = true)
                     ?: return failure("The UI planner returned no usable JSON after retry.")
                 parsedPlan = parsePlan(rawPlan, goal, observation)
             }
@@ -96,6 +97,7 @@ class UiAutomationOrchestrator(
                 else -> {
                     onProgress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
                     val result = execute(action, observation)
+                    actionHistory.add(actionLabel(action))
                     if (result.isError) {
                         logger("UiAutomation execution failed action=${actionLabel(action)}: ${result.output}")
                         return result
@@ -124,9 +126,9 @@ class UiAutomationOrchestrator(
     }
 
     private suspend fun observe(): Observation? {
-        val result = GlaiveBridge.executeTool(context, ToolCall("observe_ui", emptyMap()))
-        if (result.isError) {
-            logger("UiAutomation observe_ui failed: ${result.output}")
+        val result = AccessibilityToolHandler.execute(context, ToolCall("observe_ui", emptyMap()))
+        if (result == null || result.isError) {
+            logger("UiAutomation observe_ui failed: ${result?.output}")
             return null
         }
         return runCatching {
@@ -136,14 +138,14 @@ class UiAutomationOrchestrator(
             val returnedScreenshotPath = envelope.optString("screenshot_path").takeIf(String::isNotBlank)
             val artifactPaths = listOfNotNull(returnedXmlPath, returnedScreenshotPath)
             require(artifactPaths.all(::isGeneratedObservationPath)) {
-                "Glaive returned unexpected observation artifact paths."
+                "Accessibility Service returned unexpected observation artifact paths."
             }
             pendingArtifactPaths.addAll(artifactPaths)
-            val xmlResult = GlaiveBridge.executeTool(
+            val xmlResult = AccessibilityToolHandler.execute(
                 context,
                 ToolCall("read_ui_xml", mapOf("path" to returnedXmlPath))
             )
-            require(!xmlResult.isError) { xmlResult.output }
+            require(xmlResult != null && !xmlResult.isError) { xmlResult?.output ?: "Unknown error" }
             val packageName = envelope.optString("package").takeIf(String::isNotBlank)
             val windowTitle = envelope.optString("window_title").takeIf(String::isNotBlank)
             Observation(
@@ -163,10 +165,10 @@ class UiAutomationOrchestrator(
                 return@forEach
             }
             val deletedLocally = runCatching { !File(path).exists() || File(path).delete() }.getOrDefault(false)
-            val deleted = deletedLocally || !GlaiveBridge.executeTool(
+            val deleted = deletedLocally || (AccessibilityToolHandler.execute(
                 context,
                 ToolCall("delete_file", mapOf("path" to path))
-            ).isError
+            )?.isError == false)
             if (!deleted) logger("UiAutomation could not delete consumed artifact $path")
             if (deleted) pendingArtifactPaths.remove(path)
         }
@@ -175,7 +177,7 @@ class UiAutomationOrchestrator(
     private fun isGeneratedObservationPath(path: String): Boolean {
         val normalized = path.replace("/sdcard/", "/storage/emulated/0/")
         val file = File(normalized)
-        return file.parent == "/storage/emulated/0/Download" &&
+        return (file.parent == "/storage/emulated/0/Download" || file.parent == context.cacheDir.absolutePath) &&
             file.name.startsWith("nabu_ui_") &&
             (file.extension == "xml" || file.extension == "png")
     }
@@ -195,9 +197,10 @@ class UiAutomationOrchestrator(
     private suspend fun plan(
         goal: String,
         observation: Observation,
+        history: List<String>,
         jsonRetry: Boolean = false
     ): String? {
-        val userContent = buildPlannerInput(goal, observation.screen)
+        val userContent = buildPlannerInput(goal, observation.screen, history)
         val attachScreenshot = shouldAttachScreenshot(jsonRetry)
         logger(
             "UiAutomation planner input backend=${backend::class.java.simpleName} " +
@@ -273,7 +276,8 @@ class UiAutomationOrchestrator(
             }
             else -> return failure("Unsupported executable UI action.")
         }
-        return GlaiveBridge.executeTool(context, ToolCall(toolName, arguments))
+        return AccessibilityToolHandler.execute(context, ToolCall(toolName, arguments))
+            ?: failure("Unknown UI tool: $toolName")
     }
 
     private fun addTarget(
@@ -312,7 +316,7 @@ class UiAutomationOrchestrator(
         return true
     }
 
-    private fun buildPlannerInput(goal: String, screen: UiScreenState): String {
+    private fun buildPlannerInput(goal: String, screen: UiScreenState, history: List<String>): String {
         val elements = JsonArray()
         screen.plannerElements(MAX_PROMPT_ELEMENTS)
             .forEachIndexed { index, element ->
@@ -338,6 +342,11 @@ class UiAutomationOrchestrator(
             addProperty("screen_id", screen.screenId)
             addProperty("package", screen.packageName)
             addProperty("activity", screen.activityName)
+            if (history.isNotEmpty()) {
+                val historyArray = JsonArray()
+                history.forEach { historyArray.add(it) }
+                add("history", historyArray)
+            }
             add("elements", elements)
         }.toString()
     }
@@ -401,6 +410,7 @@ class UiAutomationOrchestrator(
             Plan one safe Android UI action. Return one JSON object only, with no Markdown.
             Required: exact supplied goal, exact screen_id, and steps containing exactly one action.
             Actions: tap, long_press, type_text, scroll, press_back, press_home, wait, ask_user, done.
+            If the history of previous actions and the current screen indicate the goal is achieved, use the 'done' action.
             Targets use {"element_id":"p0"}; copy only an id supplied in elements.
             type_text requires exact text from the goal. scroll requires direction UP, DOWN, LEFT, or RIGHT.
             wait uses ms. ask_user uses reason. done uses summary.

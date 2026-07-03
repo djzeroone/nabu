@@ -26,7 +26,8 @@ object ActionTools {
         "mute",
         "play_media",
         "pause_media",
-        "next_track"
+        "next_track",
+        "read_screen"
     )
 
     val tools: List<Tool> = listOf(
