@@ -205,7 +205,10 @@ class NabuAccessibilityService : AccessibilityService() {
             "ui_global_action" -> when (params.optString("global_action").lowercase()) {
                 "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
                 "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
-                else -> throw IllegalArgumentException("global_action must be back or home.")
+                "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+                "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+                "quick_settings" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+                else -> throw IllegalArgumentException("Unsupported global_action: ${params.optString("global_action")}")
             }
             else -> throw IllegalArgumentException("Unknown UI action: ${action}")
         }

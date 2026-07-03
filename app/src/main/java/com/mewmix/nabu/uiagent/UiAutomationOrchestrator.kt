@@ -358,21 +358,31 @@ class UiAutomationOrchestrator(
         when (policyDecision) {
             is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
             is IntentPolicyDecision.RequireConfirmation -> {
-                val fingerprint = "${actionLabel(action)}|${observation.screen.screenId}"
+                val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
+                    requestConfirmation(describeConfirmation(action, policyDecision.reason))
+                } ?: false
+                
+                if (!userApproved) {
+                    return failure("User denied UI action confirmation or timed out.")
+                }
+                
+                val latestObservation = observe() ?: return failure("Failed to re-observe screen for confirmation.")
+                if (latestObservation.screen.screenId != observation.screen.screenId) {
+                    return failure("Screen changed while awaiting confirmation. Action aborted.")
+                }
+
+                val fingerprint = "${actionLabel(action)}|${latestObservation.screen.screenId}"
                 val contentHash = action.hashCode().toString()
                 val grantId = ConfirmationManager.requestConfirmation(
                     sessionId = sessionId,
-                    screenId = observation.screen.screenId,
+                    screenId = latestObservation.screen.screenId,
                     actionFingerprint = fingerprint,
                     destination = policyDecision.preview,
-                    contentHash = contentHash
+                    contentHash = contentHash,
+                    timeoutMs = 120_000
                 )
                 
-                if (!requestConfirmation(describeConfirmation(action, policyDecision.reason))) {
-                    return failure("User denied UI action confirmation.")
-                }
-                
-                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, observation.screen.screenId, fingerprint, policyDecision.preview, contentHash)) {
+                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, fingerprint, policyDecision.preview, contentHash)) {
                     return failure("Confirmation expired or invalid.")
                 }
             }
@@ -407,12 +417,24 @@ class UiAutomationOrchestrator(
                 arguments["global_action"] = "home"
                 "ui_global_action"
             }
+            UiActionStep.PressRecents -> {
+                arguments["global_action"] = "recents"
+                "ui_global_action"
+            }
+            UiActionStep.OpenNotifications -> {
+                arguments["global_action"] = "notifications"
+                "ui_global_action"
+            }
+            UiActionStep.OpenQuickSettings -> {
+                arguments["global_action"] = "quick_settings"
+                "ui_global_action"
+            }
             is UiActionStep.OpenApp -> {
                 val result = DeviceAction.openApp(context, action.packageName, "")
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.OpenSettingsPage -> {
-                val result = DeviceAction.openSettingsPage(context, action.page.name, null)
+                val result = DeviceAction.openSettingsPage(context, action.page.name, action.packageName)
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.OpenUrl -> {
@@ -420,14 +442,14 @@ class UiAutomationOrchestrator(
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.ShareText -> {
-                val result = DeviceAction.shareText(context, action.text, "")
+                val result = DeviceAction.shareText(context, action.text, "", action.targetPackage)
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.OpenCamera -> {
                 val result = if (action.mode == CameraMode.VIDEO) {
-                    DeviceAction.recordVideo(context)
+                    DeviceAction.recordVideo(context, action.facing.name)
                 } else {
-                    DeviceAction.takePhoto(context)
+                    DeviceAction.takePhoto(context, action.facing.name)
                 }
                 return if (result.isError) failure(result.message) else success(result.message)
             }
@@ -523,8 +545,21 @@ class UiAutomationOrchestrator(
         }.toString()
     }
 
-    private fun describeConfirmation(action: UiActionStep, reason: String): String =
-        "$reason\n\nAction: ${action::class.simpleName}"
+    private fun describeConfirmation(action: UiActionStep, reason: String): String {
+        val details = when(action) {
+            is UiActionStep.OpenApp -> "App: ${action.packageName}"
+            is UiActionStep.OpenUrl -> "URL: ${action.url}"
+            is UiActionStep.ShareText -> "Text: ${action.text}\nTarget Package: ${action.targetPackage ?: "Any"}"
+            is UiActionStep.OpenSettingsPage -> "Page: ${action.page.name}\nTarget Package: ${action.packageName ?: "None"}"
+            is UiActionStep.OpenCamera -> "Mode: ${action.mode.name}\nFacing: ${action.facing.name}"
+            else -> ""
+        }
+        return if (details.isNotEmpty()) {
+            "$reason\n\nAction: ${action::class.simpleName}\n$details"
+        } else {
+            "$reason\n\nAction: ${action::class.simpleName}"
+        }
+    }
 
     private fun extractJson(raw: String): String {
         val trimmed = raw.trim()
@@ -548,6 +583,9 @@ class UiAutomationOrchestrator(
         UiActionStep.PressBack -> "press back"
         UiActionStep.PressHome -> "press home"
         is UiActionStep.Scroll -> "scroll ${action.direction.name.lowercase()}"
+        UiActionStep.PressRecents -> "press recents"
+        UiActionStep.OpenNotifications -> "open notifications"
+        UiActionStep.OpenQuickSettings -> "open quick settings"
         is UiActionStep.Wait -> "wait"
         is UiActionStep.Assert -> "assert"
         is UiActionStep.AskUser -> "ask user"
@@ -585,10 +623,13 @@ class UiAutomationOrchestrator(
         private val PLANNER_SYSTEM_PROMPT = """
             Plan one safe Android UI action. Return one JSON object only, with no Markdown.
             Required: exact supplied goal, exact screen_id, and steps containing exactly one action.
-            Actions: tap, long_press, type_text, scroll, press_back, press_home, wait, ask_user, done.
+            Actions: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera.
             If the history of previous actions and the current screen indicate the goal is achieved, use the 'done' action.
             Targets use {"element_id":"p0"}; copy only an id supplied in elements.
             type_text requires exact text from the goal. scroll requires direction UP, DOWN, LEFT, or RIGHT.
+            open_app requires package_name. open_settings_page requires page (and optional package_name for APP_DETAILS or NOTIFICATION_SETTINGS).
+            open_url requires url. share_text requires text and optional target_package.
+            open_camera requires mode (PHOTO or VIDEO) and facing (FRONT or REAR).
             wait uses ms. ask_user uses reason. done uses summary.
             You may append one assert step with condition containing element_id, text_contains, or checked.
 
@@ -608,6 +649,9 @@ class UiAutomationOrchestrator(
         is UiActionStep.OpenCamera,
         is UiActionStep.PressBack,
         is UiActionStep.PressHome,
+        is UiActionStep.PressRecents,
+        is UiActionStep.OpenNotifications,
+        is UiActionStep.OpenQuickSettings,
         is UiActionStep.Wait,
         is UiActionStep.AskUser,
         is UiActionStep.Done,

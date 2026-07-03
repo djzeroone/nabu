@@ -16,6 +16,9 @@ sealed interface UiActionStep {
     data class TypeText(val text: String, val target: UiTarget?) : UiActionStep
     data object PressBack : UiActionStep
     data object PressHome : UiActionStep
+    data object PressRecents : UiActionStep
+    data object OpenNotifications : UiActionStep
+    data object OpenQuickSettings : UiActionStep
     data class Scroll(val direction: ScrollDirection, val target: UiTarget?) : UiActionStep
     data class Wait(val milliseconds: Long) : UiActionStep
     data class Assert(val condition: UiAssertion) : UiActionStep
@@ -24,7 +27,7 @@ sealed interface UiActionStep {
     
     // Typed Android Actions
     data class OpenApp(val packageName: String) : UiActionStep
-    data class OpenSettingsPage(val page: SettingsPage) : UiActionStep
+    data class OpenSettingsPage(val page: SettingsPage, val packageName: String?) : UiActionStep
     data class OpenUrl(val url: String) : UiActionStep
     data class ShareText(val text: String, val targetPackage: String?) : UiActionStep
     data class OpenCamera(val mode: CameraMode, val facing: CameraFacing) : UiActionStep
@@ -106,6 +109,9 @@ object UiActionPlanParser {
             ).also { checkKeys(json, "action", "text", "target") }
             "press_back" -> UiActionStep.PressBack.also { checkKeys(json, "action", "target", "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label") }
             "press_home" -> UiActionStep.PressHome.also { checkKeys(json, "action", "target", "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label") }
+            "press_recents" -> UiActionStep.PressRecents.also { checkKeys(json, "action") }
+            "open_notifications" -> UiActionStep.OpenNotifications.also { checkKeys(json, "action") }
+            "open_quick_settings" -> UiActionStep.OpenQuickSettings.also { checkKeys(json, "action") }
             "scroll" -> UiActionStep.Scroll(
                 direction = ScrollDirection.valueOf(json.requiredString("direction").uppercase()),
                 target = parseTarget(json.optJsonObject("target"))
@@ -121,8 +127,9 @@ object UiActionPlanParser {
             "open_app" -> UiActionStep.OpenApp(json.requiredString("package_name"))
                 .also { checkKeys(json, "action", "package_name") }
             "open_settings_page" -> UiActionStep.OpenSettingsPage(
-                SettingsPage.valueOf(json.requiredString("page").uppercase())
-            ).also { checkKeys(json, "action", "page") }
+                page = SettingsPage.valueOf(json.requiredString("page").uppercase()),
+                packageName = json.optionalString("package_name")
+            ).also { checkKeys(json, "action", "page", "package_name") }
             "open_url" -> UiActionStep.OpenUrl(json.requiredString("url"))
                 .also { checkKeys(json, "action", "url") }
             "share_text" -> UiActionStep.ShareText(
@@ -198,13 +205,17 @@ object UiActionPlanParser {
         "input_text", "set_text", "enter_text" -> "type_text"
         "back", "go_back" -> "press_back"
         "home", "go_home" -> "press_home"
+        "recents", "recent_apps" -> "press_recents"
+        "notifications", "open_notification" -> "open_notifications"
+        "quick_settings" -> "open_quick_settings"
         else -> normalized
     }
 
     private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll")
     private val SUPPORTED_ACTIONS = TARGET_ACTIONS +
         setOf(
-            "press_back", "press_home", "wait", "assert", "ask_user", "done",
+            "press_back", "press_home", "press_recents", "open_notifications", "open_quick_settings",
+            "wait", "assert", "ask_user", "done",
             "open_app", "open_settings_page", "open_url", "share_text", "open_camera"
         )
 

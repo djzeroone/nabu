@@ -201,6 +201,7 @@ object ScheduledAgentStepExecutor {
             return UiAutomationOrchestrator(
                 context = context,
                 backend = backend,
+                isScheduled = true,
                 requestConfirmation = { false },
                 logger = { DebugLogger.log("Scheduled $it") }
             ).run(goal)

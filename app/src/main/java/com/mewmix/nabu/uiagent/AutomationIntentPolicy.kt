@@ -36,6 +36,13 @@ object AutomationIntentPolicy {
         if (policyContext.isScheduled) {
             return IntentPolicyDecision.Block("Cannot open apps during scheduled background execution.")
         }
+        if (policyContext.destinationProvenance == "planner") {
+            val lower = action.packageName.lowercase()
+            if (lower.contains("installer") || lower.contains("payment") || lower.contains("wallet") || 
+                lower.contains("bank") || lower.contains("credential") || lower.contains("auth")) {
+                return IntentPolicyDecision.Block("Planner cannot open installer, payment, or credential packages.")
+            }
+        }
         if (!isPackageInstalled(action.packageName, policyContext.context)) {
             return IntentPolicyDecision.Block("Target package '${action.packageName}' is not installed.")
         }
@@ -63,6 +70,9 @@ object AutomationIntentPolicy {
         val lowerUrl = action.url.lowercase()
         if (lowerUrl.startsWith("file:") || lowerUrl.startsWith("javascript:") || lowerUrl.startsWith("intent:")) {
             return IntentPolicyDecision.Block("Unsafe URI scheme blocked: ${action.url}")
+        }
+        if (policyContext.destinationProvenance == "planner" && action.url.contains("@")) {
+            return IntentPolicyDecision.Block("Planner cannot navigate to URLs containing embedded credentials.")
         }
         if (lowerUrl.startsWith("http://")) {
             return IntentPolicyDecision.RequireConfirmation("Opening unencrypted HTTP URL", action.url)

@@ -45,7 +45,7 @@ class AutomationIntentPolicyTest {
         val policyContext = PolicyContext(true, false, "planner", mockContext)
         
         assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenApp("pkg"), policyContext) is IntentPolicyDecision.Block)
-        assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.WIFI), policyContext) is IntentPolicyDecision.Block)
+        assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.WIFI, null), policyContext) is IntentPolicyDecision.Block)
         assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenUrl("https://example.com"), policyContext) is IntentPolicyDecision.Block)
         assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.ShareText("text", null), policyContext) is IntentPolicyDecision.Block)
         assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenCamera(CameraMode.PHOTO, CameraFacing.UNSPECIFIED), policyContext) is IntentPolicyDecision.Block)
@@ -66,9 +66,9 @@ class AutomationIntentPolicyTest {
     fun `open settings requires confirmation for sensitive pages`() {
         val policyContext = PolicyContext(false, false, "planner", mockContext)
         
-        assertEquals(IntentPolicyDecision.Allow, AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.WIFI), policyContext))
-        assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.DEVELOPER_OPTIONS), policyContext) is IntentPolicyDecision.RequireConfirmation)
-        assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.WIRELESS_DEBUGGING), policyContext) is IntentPolicyDecision.RequireConfirmation)
+        assertEquals(IntentPolicyDecision.Allow, AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.WIFI, null), policyContext))
+        assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.DEVELOPER_OPTIONS, null), policyContext) is IntentPolicyDecision.RequireConfirmation)
+        assertTrue(AutomationIntentPolicy.evaluate(UiActionStep.OpenSettingsPage(SettingsPage.WIRELESS_DEBUGGING, null), policyContext) is IntentPolicyDecision.RequireConfirmation)
     }
 
     @Test

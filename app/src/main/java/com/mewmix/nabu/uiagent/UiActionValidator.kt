@@ -73,7 +73,7 @@ object UiActionValidator {
         is UiActionStep.Assert -> validateAssertion(step.condition, screen)
         is UiActionStep.AskUser -> if (step.reason.isBlank()) UiPlanDecision.Invalid("ask_user requires a reason.") else null
         is UiActionStep.Done -> if (step.summary.isBlank()) UiPlanDecision.Invalid("done requires a summary.") else null
-        UiActionStep.PressBack, UiActionStep.PressHome -> null
+        UiActionStep.PressBack, UiActionStep.PressHome, UiActionStep.PressRecents, UiActionStep.OpenNotifications, UiActionStep.OpenQuickSettings -> null
         is UiActionStep.OpenApp,
         is UiActionStep.OpenSettingsPage,
         is UiActionStep.OpenUrl,

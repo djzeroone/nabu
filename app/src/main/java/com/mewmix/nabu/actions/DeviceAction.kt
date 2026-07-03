@@ -325,8 +325,12 @@ object DeviceAction {
         return launchIntent(context, intent) { "Opened navigation for $destination." }
     }
 
-    fun takePhoto(context: Context): ActionResult {
+    fun takePhoto(context: Context, facing: String = "UNSPECIFIED"): ActionResult {
         val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            when (facing.uppercase()) {
+                "FRONT" -> putExtra("android.intent.extras.CAMERA_FACING", 1)
+                "REAR" -> putExtra("android.intent.extras.CAMERA_FACING", 0)
+            }
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         if (!canResolveIntent(context, intent)) {
@@ -335,8 +339,12 @@ object DeviceAction {
         return launchIntent(context, intent) { "Opened camera for photo capture." }
     }
 
-    fun recordVideo(context: Context): ActionResult {
+    fun recordVideo(context: Context, facing: String = "UNSPECIFIED"): ActionResult {
         val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
+            when (facing.uppercase()) {
+                "FRONT" -> putExtra("android.intent.extras.CAMERA_FACING", 1)
+                "REAR" -> putExtra("android.intent.extras.CAMERA_FACING", 0)
+            }
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         if (!canResolveIntent(context, intent)) {
@@ -379,7 +387,7 @@ object DeviceAction {
         }
     }
 
-    fun shareText(context: Context, text: String, subject: String): ActionResult {
+    fun shareText(context: Context, text: String, subject: String, targetPackage: String? = null): ActionResult {
         if (text.isBlank()) return ActionResult("Missing required parameter: text", true)
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -387,10 +395,16 @@ object DeviceAction {
             if (subject.isNotBlank()) {
                 putExtra(Intent.EXTRA_SUBJECT, subject)
             }
+            if (targetPackage != null) {
+                setPackage(targetPackage)
+            }
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         if (!canResolveIntent(context, intent)) {
             return ActionResult("No share targets are available on this device.", true)
+        }
+        if (targetPackage != null) {
+            return launchIntent(context, intent) { "Opened share sheet for $targetPackage." }
         }
         val chooser = Intent.createChooser(intent, "Share with").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
