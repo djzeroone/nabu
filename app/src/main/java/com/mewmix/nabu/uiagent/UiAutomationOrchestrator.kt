@@ -254,7 +254,7 @@ class UiAutomationOrchestrator(
             }
             observation = next
             }
-            null
+            failure("UI action limit reached before the goal was verified.")
         }
         return executionResult ?: failure("UI automation reached wall-clock time limit.")
     }
