@@ -16,6 +16,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,6 +26,7 @@ class UiAutomationOrchestrator(
     private val context: Context,
     private val backend: LlmBackend,
     private val requestConfirmation: suspend (String) -> Boolean,
+    private val budget: AutomationBudget = AutomationBudget(),
     private val onProgress: (phase: String, detail: String) -> Unit = { _, _ -> },
     private val onModelOutput: (String) -> Unit = {},
     private val logger: (String) -> Unit = {}
@@ -37,11 +40,15 @@ class UiAutomationOrchestrator(
     private val pendingArtifactPaths = linkedSetOf<String>()
 
     suspend fun run(goal: String): ToolResult {
+        if (!sessionMutex.tryLock()) {
+            return failure("Automation session is already running. Please wait or cancel the existing session.")
+        }
         return try {
             runWithCleanup(goal)
         } finally {
             withContext(NonCancellable) {
                 cleanupArtifacts(pendingArtifactPaths.toList())
+                sessionMutex.unlock()
             }
         }
     }
@@ -51,26 +58,39 @@ class UiAutomationOrchestrator(
         onProgress("Observe", "Capturing the active window and accessibility tree")
         delay(INITIAL_OBSERVATION_DELAY_MS)
         var observation = observe() ?: return failure("Unable to observe the current UI through the Accessibility Service.")
+        
+        val startTimeMs = System.currentTimeMillis()
         var unchangedCount = 0
-        val actionHistory = mutableListOf<String>()
+        var cumulativeWaitMs = 0L
+        val actionHistory = mutableListOf<UiActionHistoryEntry>()
+        val successfulFingerprints = mutableSetOf<String>()
 
-        repeat(MAX_ACTIONS) { actionIndex ->
+        repeat(budget.maxExecutedActions) { actionIndex ->
+            if (System.currentTimeMillis() - startTimeMs > budget.maxWallClockDurationMs) {
+                return failure("UI automation reached wall-clock time limit.")
+            }
             onProgress("Plan ${actionIndex + 1}", "Choosing the next UI action")
+            
             var rawPlan = plan(goal, observation, actionHistory)
                 ?: return failure("The UI planner returned no usable plan.")
             var parsedPlan = parsePlan(rawPlan, goal, observation)
-            if (parsedPlan.isFailure) {
-                val firstError = parsedPlan.exceptionOrNull()
-                logger("UiAutomation planner parse failed: ${firstError?.message}; output=${rawPlan.take(500)}")
+            
+            var retries = 0
+            while (parsedPlan.isFailure && retries < budget.maxPlannerRetriesPerObservation) {
+                val errorMsg = parsedPlan.exceptionOrNull()?.message
+                logger("UiAutomation planner parse failed: $errorMsg; output=${rawPlan.take(500)}")
                 onProgress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
                 rawPlan = plan(goal, observation, actionHistory, jsonRetry = true)
                     ?: return failure("The UI planner returned no usable JSON after retry.")
                 parsedPlan = parsePlan(rawPlan, goal, observation)
+                retries++
             }
+            
             val actionPlan = parsedPlan.getOrElse { error ->
                 logger("UiAutomation planner retry parse failed: ${error.message}; output=${rawPlan.take(500)}")
                 return failure("The UI planner returned invalid action JSON after retry: ${error.message}")
             }
+            
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> {
@@ -89,17 +109,56 @@ class UiAutomationOrchestrator(
             }
 
             val action = actionPlan.steps.first { it !is UiActionStep.Assert }
+            val fingerprint = "${actionLabel(action)}|${observation.screen.screenId}"
+            
+            if (successfulFingerprints.contains(fingerprint) && unchangedCount > 0) {
+                logger("UiAutomation repetion detected: fingerprint=$fingerprint")
+                return failure("Planner proposed a repetitive action that already succeeded on this exact screen without changing it.")
+            }
+
             onProgress("Decision ${actionIndex + 1}", "Planner selected ${actionLabel(action)}")
             when (action) {
                 is UiActionStep.Done -> return success(action.summary)
                 is UiActionStep.AskUser -> return success("User input required: ${action.reason}")
-                is UiActionStep.Wait -> delay(action.milliseconds)
+                is UiActionStep.Wait -> {
+                    val waitTime = action.milliseconds.coerceAtMost(budget.maxSingleWaitMs)
+                    if (cumulativeWaitMs + waitTime > budget.maxCumulativeWaitMs) {
+                        return failure("Wait budget exceeded.")
+                    }
+                    cumulativeWaitMs += waitTime
+                    delay(waitTime)
+                    actionHistory.add(
+                        UiActionHistoryEntry(
+                            index = actionIndex,
+                            action = actionLabel(action),
+                            targetElementId = null,
+                            targetLabel = null,
+                            sourceScreenId = observation.screen.screenId,
+                            resultScreenId = observation.screen.screenId,
+                            outcome = Outcome.SUCCEEDED,
+                            changedScreen = false,
+                            detail = "waited ${waitTime}ms"
+                        )
+                    )
+                }
                 else -> {
                     onProgress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
                     val result = execute(action, observation)
-                    actionHistory.add(actionLabel(action))
                     if (result.isError) {
                         logger("UiAutomation execution failed action=${actionLabel(action)}: ${result.output}")
+                        actionHistory.add(
+                            UiActionHistoryEntry(
+                                index = actionIndex,
+                                action = actionLabel(action),
+                                targetElementId = getTargetElementId(action),
+                                targetLabel = getTargetLabel(action, observation.screen),
+                                sourceScreenId = observation.screen.screenId,
+                                resultScreenId = observation.screen.screenId,
+                                outcome = Outcome.FAILED,
+                                changedScreen = false,
+                                detail = result.output
+                            )
+                        )
                         return result
                     }
                 }
@@ -112,12 +171,31 @@ class UiAutomationOrchestrator(
                 return success("Completed UI goal: $goal")
             }
 
-            unchangedCount = if (next.screen.screenId == observation.screen.screenId) unchangedCount + 1 else 0
+            val changed = next.screen.screenId != observation.screen.screenId
+            unchangedCount = if (changed) 0 else unchangedCount + 1
+            
+            if (action !is UiActionStep.Wait && action !is UiActionStep.Done && action !is UiActionStep.AskUser) {
+                successfulFingerprints.add(fingerprint)
+                actionHistory.add(
+                    UiActionHistoryEntry(
+                        index = actionIndex,
+                        action = actionLabel(action),
+                        targetElementId = getTargetElementId(action),
+                        targetLabel = getTargetLabel(action, observation.screen),
+                        sourceScreenId = observation.screen.screenId,
+                        resultScreenId = next.screen.screenId,
+                        outcome = Outcome.SUCCEEDED,
+                        changedScreen = changed,
+                        detail = null
+                    )
+                )
+            }
+            
             logger(
                 "UiAutomation step=${actionIndex + 1} action=${action::class.simpleName} " +
                     "screen=${observation.screen.screenId}->${next.screen.screenId} unchanged=$unchangedCount"
             )
-            if (unchangedCount >= MAX_UNCHANGED_OBSERVATIONS) {
+            if (unchangedCount >= budget.maxUnchangedObservations) {
                 return failure("UI did not change after repeated actions; stopping automation.")
             }
             observation = next
@@ -199,7 +277,7 @@ class UiAutomationOrchestrator(
     private suspend fun plan(
         goal: String,
         observation: Observation,
-        history: List<String>,
+        history: List<UiActionHistoryEntry>,
         jsonRetry: Boolean = false
     ): String? {
         val userContent = buildPlannerInput(goal, observation.screen, history)
@@ -318,7 +396,7 @@ class UiAutomationOrchestrator(
         return true
     }
 
-    private fun buildPlannerInput(goal: String, screen: UiScreenState, history: List<String>): String {
+    private fun buildPlannerInput(goal: String, screen: UiScreenState, history: List<UiActionHistoryEntry>): String {
         val elements = JsonArray()
         screen.plannerElements(MAX_PROMPT_ELEMENTS)
             .forEachIndexed { index, element ->
@@ -345,8 +423,23 @@ class UiAutomationOrchestrator(
             addProperty("package", screen.packageName)
             addProperty("activity", screen.activityName)
             if (history.isNotEmpty()) {
+                val recentEntries = history.takeLast(8)
+                val olderEntries = history.dropLast(8)
+                val olderSuccesses = olderEntries.count { it.outcome == Outcome.SUCCEEDED }
+                
+                if (olderSuccesses > 0) {
+                    addProperty("older_successful_actions", olderSuccesses)
+                }
+
                 val historyArray = JsonArray()
-                history.forEach { historyArray.add(it) }
+                recentEntries.forEach { entry -> 
+                    historyArray.add(JsonObject().apply {
+                        addProperty("action", entry.action)
+                        entry.targetLabel?.let { addProperty("target_label", it) }
+                        addProperty("outcome", entry.outcome.name.lowercase())
+                        addProperty("screen_changed", entry.changedScreen)
+                    })
+                }
                 add("history", historyArray)
             }
             add("elements", elements)
@@ -386,8 +479,7 @@ class UiAutomationOrchestrator(
 
     companion object {
         const val CONTROL_UI_TOOL = "control_ui"
-        private const val MAX_ACTIONS = 5
-        private const val MAX_UNCHANGED_OBSERVATIONS = 2
+        val sessionMutex = Mutex()
         private const val MAX_PROMPT_ELEMENTS = 32
         private const val PLANNER_TIMEOUT_MS = 45_000L
         private const val INITIAL_OBSERVATION_DELAY_MS = 500L
@@ -420,5 +512,18 @@ class UiAutomationOrchestrator(
 
             Never plan payments, purchases, passwords, 2FA, account deletion, factory reset, permission escalation, or unknown APK installation.
         """.trimIndent()
+    }
+
+    private fun getTargetElementId(action: UiActionStep): String? = when(action) {
+        is UiActionStep.Tap -> action.target.elementId
+        is UiActionStep.LongPress -> action.target.elementId
+        is UiActionStep.TypeText -> action.target?.elementId
+        is UiActionStep.Scroll -> action.target?.elementId
+        else -> null
+    }
+
+    private fun getTargetLabel(action: UiActionStep, screen: UiScreenState): String? {
+        val id = getTargetElementId(action) ?: return null
+        return screen.element(id)?.let { screen.plannerLabel(it) }
     }
 }
