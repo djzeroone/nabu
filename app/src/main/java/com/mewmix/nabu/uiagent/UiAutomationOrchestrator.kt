@@ -111,7 +111,10 @@ class UiAutomationOrchestrator(
                 }
                 is UiPlanDecision.RequireConfirmation -> {
                     onProgress("Confirm", "Verifying destination identity")
-                    val destination = extractDestination(observation.screen, goal)
+                    val destination = DestinationResolver.resolve(observation.screen)
+                    if (destination == null) {
+                        return@withTimeoutOrNull failure("Action blocked: Destination identity cannot be proven for confirmation.")
+                    }
                     val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
                         requestConfirmation(describeConfirmation(action, decision.reason, observation.screen, goal, destination))
                     } ?: false
@@ -134,12 +137,12 @@ class UiAutomationOrchestrator(
                         sessionId = sessionId,
                         screenId = latestObservation.screen.screenId,
                         actionFingerprint = updatedFingerprint,
-                        destination = null,
+                        destination = destination,
                         contentHash = contentHash,
                         timeoutMs = 120_000
                     )
                     
-                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, null, contentHash)) {
+                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, destination, contentHash)) {
                         return@withTimeoutOrNull failure("Confirmation expired or invalid.")
                     }
                 }
@@ -401,7 +404,10 @@ class UiAutomationOrchestrator(
             is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
             is IntentPolicyDecision.RequireConfirmation -> {
                 onProgress("Confirm", "Verifying destination identity")
-                val destination = extractDestination(currentObservation.screen, goal)
+                val destination = policyDecision.preview ?: DestinationResolver.resolve(currentObservation.screen)
+                if (destination == null) {
+                    return failure("Action blocked: Destination identity cannot be proven for confirmation.")
+                }
                 val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
                     val description = describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal, destination)
                     requestConfirmation(description)
@@ -632,28 +638,6 @@ class UiAutomationOrchestrator(
         }
     }
     
-    private suspend fun extractDestination(screen: UiScreenState, goal: String): String = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-        val elementsText = screen.elements.filter { !it.editable && it.text?.isNotBlank() == true }
-            .take(15)
-            .joinToString("\n") { it.text!! }
-        val prompt = """
-            Analyze this Android screen and extract the name of the current chat recipient or destination, if any. 
-            Goal: $goal
-            Screen: 
-            $elementsText
-            
-            Return ONLY the name, or UNKNOWN if unclear.
-        """.trimIndent()
-        val sb = StringBuilder()
-        backend.sendMessage(prompt) { partial, done ->
-            sb.append(partial)
-            if (done) {
-                val result = sb.toString().trim()
-                cont.resumeWith(Result.success(if (result.isBlank()) "UNKNOWN" else result))
-            }
-        }
-    }
-
     private fun hashContent(vararg inputs: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
         for (input in inputs) {
