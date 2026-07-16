@@ -29,8 +29,16 @@ sealed interface UiActionStep {
     data class OpenApp(val packageName: String) : UiActionStep
     data class OpenSettingsPage(val page: SettingsPage, val packageName: String?) : UiActionStep
     data class OpenUrl(val url: String) : UiActionStep
-    data class ShareText(val text: String, val targetPackage: String?) : UiActionStep
+    data class ShareText(
+        val text: String,
+        val targetPackage: String?,
+        val expectedDestination: String? = null
+    ) : UiActionStep
     data class OpenCamera(val mode: CameraMode, val facing: CameraFacing) : UiActionStep
+    data class ShareCapturedMedia(
+        val targetPackage: String,
+        val expectedDestination: String
+    ) : UiActionStep
 }
 
 data class UiTarget(
@@ -134,12 +142,17 @@ object UiActionPlanParser {
                 .also { checkKeys(json, "action", "url") }
             "share_text" -> UiActionStep.ShareText(
                 text = json.requiredString("text"),
-                targetPackage = json.optionalString("target_package")
-            ).also { checkKeys(json, "action", "text", "target_package") }
+                targetPackage = json.optionalString("target_package"),
+                expectedDestination = json.optionalString("expected_destination")
+            ).also { checkKeys(json, "action", "text", "target_package", "expected_destination") }
             "open_camera" -> UiActionStep.OpenCamera(
                 mode = CameraMode.valueOf(json.requiredString("mode").uppercase()),
                 facing = CameraFacing.valueOf(json.requiredString("facing").uppercase())
             ).also { checkKeys(json, "action", "mode", "facing") }
+            "share_captured_media" -> UiActionStep.ShareCapturedMedia(
+                targetPackage = json.requiredString("target_package"),
+                expectedDestination = json.requiredString("expected_destination")
+            ).also { checkKeys(json, "action", "target_package", "expected_destination") }
             else -> error("Unsupported UI action '$actionName'.")
         }
     }
@@ -216,7 +229,7 @@ object UiActionPlanParser {
         setOf(
             "press_back", "press_home", "press_recents", "open_notifications", "open_quick_settings",
             "wait", "assert", "ask_user", "done",
-            "open_app", "open_settings_page", "open_url", "share_text", "open_camera"
+            "open_app", "open_settings_page", "open_url", "share_text", "open_camera", "share_captured_media"
         )
 
     private fun parseTarget(json: JsonObject?): UiTarget? {

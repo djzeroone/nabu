@@ -14,8 +14,8 @@ object UiActionValidator {
         "delete account", "factory reset", "install unknown", "unknown apk"
     )
     private val confirmationTerms = listOf(
-        "send", "post", "publish", "call", "delete", "remove file", "security setting",
-        "grant permission", "allow permission", "permission"
+        "send", "post", "publish", "call", "delete", "remove file", "allow",
+        "shutter", "take photo", "capture", "record"
     )
 
     fun validate(plan: UiActionPlan, screen: UiScreenState): UiPlanDecision {
@@ -31,7 +31,8 @@ object UiActionValidator {
             validateStep(step, screen)?.let { return it }
         }
 
-        confirmationTerms.firstOrNull(context::contains)?.let {
+        val confirmationContext = buildCommitBoundaryContext(plan, screen).lowercase()
+        confirmationTerms.firstOrNull(confirmationContext::contains)?.let {
             return UiPlanDecision.RequireConfirmation("Confirmation required for action involving '$it'.")
         }
         return UiPlanDecision.Allow
@@ -78,7 +79,8 @@ object UiActionValidator {
         is UiActionStep.OpenSettingsPage,
         is UiActionStep.OpenUrl,
         is UiActionStep.ShareText,
-        is UiActionStep.OpenCamera -> null
+        is UiActionStep.OpenCamera,
+        is UiActionStep.ShareCapturedMedia -> null
     }
 
     private fun validateTarget(
@@ -134,9 +136,9 @@ object UiActionValidator {
             val id = when (step) {
                 is UiActionStep.Tap -> step.target.elementId
                 is UiActionStep.LongPress -> step.target.elementId
-                is UiActionStep.TypeText -> step.target?.elementId
+            is UiActionStep.TypeText -> step.target?.elementId
                 is UiActionStep.Scroll -> step.target?.elementId
-                is UiActionStep.Assert -> step.condition.elementId
+            is UiActionStep.Assert -> step.condition.elementId
                 else -> null
             }
             id?.let(screen::element)?.let { element ->
@@ -145,6 +147,18 @@ object UiActionValidator {
         }
         return (listOf(plan.goal) + targetText).joinToString(" ")
     }
+
+    private fun buildCommitBoundaryContext(plan: UiActionPlan, screen: UiScreenState): String =
+        plan.steps.mapNotNull { step ->
+            val id = when (step) {
+                is UiActionStep.Tap -> step.target.elementId
+                is UiActionStep.LongPress -> step.target.elementId
+                else -> null
+            }
+            id?.let(screen::element)?.let { element ->
+                listOfNotNull(element.text, element.contentDescription, element.resourceId).joinToString(" ")
+            }
+        }.joinToString(" ")
 }
 
 internal fun UiActionPlan.resolveElementReferences(screen: UiScreenState): UiActionPlan = copy(

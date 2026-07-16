@@ -125,6 +125,7 @@ class MyApplication : Application() {
         DynamicColors.applyToActivitiesIfAvailable(this)
         // Ensure early initialization of file logger and optional method tracing
         com.mewmix.nabu.utils.DebugLogger.initialize(this)
+        com.mewmix.nabu.uiagent.AutomationMediaManager.purgeAllCaptures(this)
 
         // Global uncaught exception handler to capture stack traces in our log
         Thread.setDefaultUncaughtExceptionHandler { t, e ->

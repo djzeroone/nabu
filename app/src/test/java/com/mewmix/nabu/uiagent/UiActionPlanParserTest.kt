@@ -72,4 +72,30 @@ class UiActionPlanParserTest {
             "screen1"
         )
     }
+
+    @Test
+    fun `parses captured media share with explicit destination`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            """{"action":"share_captured_media","target_package":"com.google.android.apps.messaging","expected_destination":"+19497714923"}""",
+            "Send the captured image to +19497714923",
+            "screen1"
+        )
+
+        assertEquals(
+            UiActionStep.ShareCapturedMedia(
+                targetPackage = "com.google.android.apps.messaging",
+                expectedDestination = "+19497714923"
+            ),
+            plan.steps.single()
+        )
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun `captured media share rejects missing destination`() {
+        UiActionPlanParser.parsePlannerOutput(
+            """{"action":"share_captured_media","target_package":"com.google.android.apps.messaging"}""",
+            "Share captured media",
+            "screen1"
+        )
+    }
 }

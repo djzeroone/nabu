@@ -66,11 +66,17 @@ fun UiActionStep.toJson(): JsonObject {
             obj.addProperty("action", "share_text")
             obj.addProperty("text", this.text)
             this.targetPackage?.let { obj.addProperty("target_package", it) }
+            this.expectedDestination?.let { obj.addProperty("expected_destination", it) }
         }
         is UiActionStep.OpenCamera -> {
             obj.addProperty("action", "open_camera")
             obj.addProperty("mode", this.mode.name)
             obj.addProperty("facing", this.facing.name)
+        }
+        is UiActionStep.ShareCapturedMedia -> {
+            obj.addProperty("action", "share_captured_media")
+            obj.addProperty("target_package", this.targetPackage)
+            obj.addProperty("expected_destination", this.expectedDestination)
         }
     }
     return obj

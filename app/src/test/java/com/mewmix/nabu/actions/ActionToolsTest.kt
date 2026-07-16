@@ -696,6 +696,37 @@ class ActionToolsTest {
     }
 
     @Test
+    fun cameraOutputAndMediaShareUseOnlyGrantedContentUris() {
+        DeviceAction.canResolveIntent = { _, _ -> true }
+        val launched = mutableListOf<Intent>()
+        DeviceAction.activityLauncher = { _, intent -> launched += intent }
+        val uri = android.net.Uri.parse("content://com.mewmix.nabu.automation.fileprovider/automation_capture/test.jpg")
+
+        val camera = DeviceAction.takePhoto(context, "FRONT", uri)
+        val share = DeviceAction.shareMedia(context, uri, "image/jpeg", "com.example.messages")
+
+        assertFalse(camera.isError)
+        assertFalse(share.isError)
+        assertEquals(uri, launched[0].getParcelableExtra(android.provider.MediaStore.EXTRA_OUTPUT))
+        assertTrue(launched[0].flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0)
+        assertEquals(uri, launched[1].getParcelableExtra(Intent.EXTRA_STREAM))
+        assertEquals("com.example.messages", launched[1].getPackage())
+        assertTrue(launched[1].flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+    }
+
+    @Test
+    fun mediaShareRejectsFileUris() {
+        val result = DeviceAction.shareMedia(
+            context,
+            android.net.Uri.parse("file:///sdcard/photo.jpg"),
+            "image/jpeg",
+            "com.example.messages"
+        )
+
+        assertTrue(result.isError)
+    }
+
+    @Test
     fun execute_toggleWifiExplainsSettingsFallback() {
         DeviceAction.canResolveIntent = { _, _ -> true }
         var launchedIntent: Intent? = null

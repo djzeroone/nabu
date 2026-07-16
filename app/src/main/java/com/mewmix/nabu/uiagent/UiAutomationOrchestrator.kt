@@ -2,6 +2,7 @@ package com.mewmix.nabu.uiagent
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.net.Uri
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.mewmix.nabu.chat.LlmBackend
@@ -41,7 +42,17 @@ class UiAutomationOrchestrator(
         val screenshotPath: String?
     )
 
+    private data class PendingCapture(val uri: Uri, val mimeType: String)
+    private data class PendingExternalEffect(
+        val targetPackage: String,
+        val expectedDestination: String,
+        val contentHash: String
+    )
+
     private val pendingArtifactPaths = linkedSetOf<String>()
+    private val pendingMediaUris = linkedSetOf<Uri>()
+    private var pendingCapture: PendingCapture? = null
+    private var pendingExternalEffect: PendingExternalEffect? = null
 
     suspend fun run(goal: String): ToolResult {
         if (!sessionMutex.tryLock()) {
@@ -53,6 +64,8 @@ class UiAutomationOrchestrator(
         } finally {
             withContext(NonCancellable) {
                 cleanupArtifacts(pendingArtifactPaths.toList())
+                AutomationMediaManager.cleanupAll(context, pendingMediaUris.toList())
+                pendingMediaUris.clear()
                 sessionMutex.unlock()
             }
         }
@@ -97,7 +110,7 @@ class UiAutomationOrchestrator(
             
             val action = actionPlan.steps.first { it !is UiActionStep.Assert }
             val fingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${observation.screen.screenId}"
-            val contentHash = hashContent(action.toJson().toString(), goal)
+            val contentHash = confirmationContentHash(action, observation.screen, goal)
             
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
@@ -110,13 +123,22 @@ class UiAutomationOrchestrator(
                     return@withTimeoutOrNull failure(decision.reason)
                 }
                 is UiPlanDecision.RequireConfirmation -> {
-                    onProgress("Confirm", "Verifying destination identity")
-                    val destination = DestinationResolver.resolve(observation.screen)
-                    if (destination == null) {
-                        return@withTimeoutOrNull failure("Action blocked: Destination identity cannot be proven for confirmation.")
+                    onProgress("Confirm", "Evaluating confirmation requirements")
+                    val expectedDestination = expectedDestinationForCommit(action, observation.screen)
+                    if (isMessagingCommitBoundary(action, observation.screen) && expectedDestination == null) {
+                        return@withTimeoutOrNull failure("Action blocked: no verified pending message is bound to this send action.")
+                    }
+                    val needsDestination = expectedDestination != null
+                    var verifiedDestination: String? = null
+                    if (needsDestination) {
+                        when (val result = DestinationResolver.resolve(observation.screen, expectedDestination)) {
+                            is DestinationResolver.DestinationResult.Verified -> verifiedDestination = result.observed
+                            is DestinationResolver.DestinationResult.Mismatch -> return@withTimeoutOrNull failure("Destination mismatch: observed '${result.observed}' but expected '${result.expected}'.")
+                            is DestinationResolver.DestinationResult.Unresolvable -> return@withTimeoutOrNull failure("Action blocked: ${result.reason}")
+                        }
                     }
                     val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
-                        requestConfirmation(describeConfirmation(action, decision.reason, observation.screen, goal, destination))
+                        requestConfirmation(describeConfirmation(action, decision.reason, observation.screen, goal, verifiedDestination))
                     } ?: false
                     
                     if (!userApproved) {
@@ -128,6 +150,15 @@ class UiAutomationOrchestrator(
                         return@withTimeoutOrNull failure("Screen changed while awaiting confirmation. Action aborted.")
                     }
 
+                    // Re-verify destination after user confirmation
+                    if (needsDestination && verifiedDestination != null) {
+                        when (val recheck = DestinationResolver.resolve(latestObservation.screen, verifiedDestination)) {
+                            is DestinationResolver.DestinationResult.Verified -> Unit
+                            is DestinationResolver.DestinationResult.Mismatch -> return@withTimeoutOrNull failure("Destination changed after confirmation: observed '${recheck.observed}' but expected '${recheck.expected}'.")
+                            is DestinationResolver.DestinationResult.Unresolvable -> return@withTimeoutOrNull failure("Destination unresolvable after confirmation: ${recheck.reason}")
+                        }
+                    }
+
                     val updatedFingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${latestObservation.screen.screenId}"
                     
                     // Assign latest observation before proceeding
@@ -137,12 +168,12 @@ class UiAutomationOrchestrator(
                         sessionId = sessionId,
                         screenId = latestObservation.screen.screenId,
                         actionFingerprint = updatedFingerprint,
-                        destination = destination,
+                        destination = verifiedDestination,
                         contentHash = contentHash,
                         timeoutMs = 120_000
                     )
                     
-                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, destination, contentHash)) {
+                    if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, verifiedDestination, contentHash)) {
                         return@withTimeoutOrNull failure("Confirmation expired or invalid.")
                     }
                 }
@@ -392,6 +423,16 @@ class UiAutomationOrchestrator(
     }
 
     private suspend fun execute(action: UiActionStep, observation: Observation, sessionId: String, goal: String): ToolResult {
+        if (action is UiActionStep.ShareCapturedMedia) {
+            val capture = pendingCapture
+                ?: return failure("No captured media is available to share.")
+            if (!AutomationMediaManager.validateCaptureOutput(context, capture.uri)) {
+                return failure("Captured media is empty or unavailable.")
+            }
+            if (!goalExplicitlyNamesDestination(goal, action.expectedDestination)) {
+                return failure("Expected destination must be explicitly present in the user's goal.")
+            }
+        }
         val policyContext = PolicyContext(
             isScheduled = isScheduled,
             isDeviceLocked = isDeviceLocked(),
@@ -403,13 +444,22 @@ class UiAutomationOrchestrator(
         when (policyDecision) {
             is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
             is IntentPolicyDecision.RequireConfirmation -> {
-                onProgress("Confirm", "Verifying destination identity")
-                val destination = policyDecision.preview ?: DestinationResolver.resolve(currentObservation.screen)
-                if (destination == null) {
-                    return failure("Action blocked: Destination identity cannot be proven for confirmation.")
+                onProgress("Confirm", "Evaluating confirmation requirements")
+                val expectedDestination = expectedDestinationForCommit(action, currentObservation.screen)
+                if (isMessagingCommitBoundary(action, currentObservation.screen) && expectedDestination == null) {
+                    return failure("Action blocked: no verified pending message is bound to this send action.")
+                }
+                val needsDestination = expectedDestination != null
+                var verifiedDestination: String? = null
+                if (needsDestination) {
+                    when (val result = DestinationResolver.resolve(currentObservation.screen, expectedDestination)) {
+                        is DestinationResolver.DestinationResult.Verified -> verifiedDestination = result.observed
+                        is DestinationResolver.DestinationResult.Mismatch -> return failure("Destination mismatch: observed '${result.observed}' but expected '${result.expected}'.")
+                        is DestinationResolver.DestinationResult.Unresolvable -> return failure("Action blocked: ${result.reason}")
+                    }
                 }
                 val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
-                    val description = describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal, destination)
+                    val description = describeConfirmation(action, policyDecision.reason, currentObservation.screen, goal, verifiedDestination)
                     requestConfirmation(description)
                 } ?: false
                 
@@ -423,19 +473,28 @@ class UiAutomationOrchestrator(
                 }
                 
                 currentObservation = latestObservation
+
+                // Re-verify destination after user confirmation
+                if (needsDestination && verifiedDestination != null) {
+                    when (val recheck = DestinationResolver.resolve(currentObservation.screen, verifiedDestination)) {
+                        is DestinationResolver.DestinationResult.Verified -> Unit
+                        is DestinationResolver.DestinationResult.Mismatch -> return failure("Destination changed after confirmation: observed '${recheck.observed}' but expected '${recheck.expected}'.")
+                        is DestinationResolver.DestinationResult.Unresolvable -> return failure("Destination unresolvable after confirmation: ${recheck.reason}")
+                    }
+                }
                 
                 val fingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${currentObservation.screen.screenId}"
-                val contentHash = hashContent(action.toJson().toString(), goal)
+                val contentHash = confirmationContentHash(action, currentObservation.screen, goal)
                 val grantId = ConfirmationManager.requestConfirmation(
                     sessionId = sessionId,
                     screenId = currentObservation.screen.screenId,
                     actionFingerprint = fingerprint,
-                    destination = destination,
+                    destination = verifiedDestination,
                     contentHash = contentHash,
                     timeoutMs = 120_000
                 )
                 
-                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, currentObservation.screen.screenId, fingerprint, destination, contentHash)) {
+                if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, currentObservation.screen.screenId, fingerprint, verifiedDestination, contentHash)) {
                     return failure("Confirmation expired or invalid.")
                 }
             }
@@ -495,21 +554,72 @@ class UiAutomationOrchestrator(
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.ShareText -> {
+                if (action.expectedDestination != null &&
+                    !goalExplicitlyNamesDestination(goal, action.expectedDestination)
+                ) {
+                    return failure("Expected destination must be explicitly present in the user's goal.")
+                }
                 val result = DeviceAction.shareText(context, action.text, "", action.targetPackage)
+                if (!result.isError && action.targetPackage != null && action.expectedDestination != null) {
+                    pendingExternalEffect = PendingExternalEffect(
+                        targetPackage = action.targetPackage,
+                        expectedDestination = action.expectedDestination,
+                        contentHash = hashContent(action.text)
+                    )
+                }
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.OpenCamera -> {
-                val result = if (action.mode == CameraMode.VIDEO) {
-                    DeviceAction.recordVideo(context, action.facing.name)
+                val mimeType = if (action.mode == CameraMode.VIDEO) {
+                    AutomationMediaManager.VIDEO_MIME_TYPE
                 } else {
-                    DeviceAction.takePhoto(context, action.facing.name)
+                    AutomationMediaManager.IMAGE_MIME_TYPE
+                }
+                val outputUri = runCatching {
+                    AutomationMediaManager.createCaptureOutputUri(context, mimeType)
+                }.getOrElse { return failure("Unable to create trusted capture output: ${it.message}") }
+                pendingMediaUris += outputUri
+                val result = if (action.mode == CameraMode.VIDEO) {
+                    DeviceAction.recordVideo(context, action.facing.name, outputUri)
+                } else {
+                    DeviceAction.takePhoto(context, action.facing.name, outputUri)
+                }
+                if (result.isError) {
+                    AutomationMediaManager.cleanupAll(context, listOf(outputUri))
+                    pendingMediaUris -= outputUri
+                } else {
+                    pendingCapture = PendingCapture(outputUri, mimeType)
+                }
+                return if (result.isError) failure(result.message) else success(result.message)
+            }
+            is UiActionStep.ShareCapturedMedia -> {
+                val capture = pendingCapture ?: return failure("No captured media is available to share.")
+                val mediaHash = AutomationMediaManager.contentSha256(context, capture.uri)
+                    ?: return failure("Unable to hash captured media.")
+                AutomationMediaManager.grantUriReadPermission(context, capture.uri, action.targetPackage)
+                val result = DeviceAction.shareMedia(
+                    context = context,
+                    uri = capture.uri,
+                    mimeType = capture.mimeType,
+                    targetPackage = action.targetPackage
+                )
+                if (!result.isError) {
+                    pendingExternalEffect = PendingExternalEffect(
+                        targetPackage = action.targetPackage,
+                        expectedDestination = action.expectedDestination,
+                        contentHash = mediaHash
+                    )
                 }
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             else -> return failure("Unsupported executable UI action.")
         }
-        return AccessibilityToolHandler.execute(context, ToolCall(toolName, arguments))
+        val result = AccessibilityToolHandler.execute(context, ToolCall(toolName, arguments))
             ?: failure("Unknown UI tool: $toolName")
+        if (!result.isError && isMessagingCommitBoundary(action, currentObservation.screen)) {
+            pendingExternalEffect = null
+        }
+        return result
     }
 
     private fun addTarget(
@@ -627,6 +737,16 @@ class UiAutomationOrchestrator(
             is UiActionStep.ShareText -> "Text: ${action.text}\nTarget Package: ${action.targetPackage ?: "Any"}"
             is UiActionStep.OpenSettingsPage -> "Page: ${action.page.name}\nTarget Package: ${action.packageName ?: "None"}"
             is UiActionStep.OpenCamera -> "Mode: ${action.mode.name}\nFacing: ${action.facing.name}"
+            is UiActionStep.ShareCapturedMedia -> {
+                val capture = pendingCapture
+                val size = capture?.let { AutomationMediaManager.contentSize(context, it.uri) }
+                val hash = capture?.let { AutomationMediaManager.contentSha256(context, it.uri) }
+                "Captured media: ${capture?.mimeType ?: "unavailable"}\n" +
+                    "Size: ${size?.let { "$it bytes" } ?: "unknown"}\n" +
+                    "SHA-256: ${hash ?: "unavailable"}\n" +
+                    "Target Package: ${action.targetPackage}\n" +
+                    "Expected Destination: ${action.expectedDestination}"
+            }
             else -> ""
         }
         val contextStr = if (contextLines.isNotEmpty()) "\n\nContext:\n$contextLines" else ""
@@ -637,7 +757,48 @@ class UiAutomationOrchestrator(
             "$reason\n\nGoal: $goal$destStr$contextStr\n\nAction: ${action::class.simpleName}"
         }
     }
-    
+    private fun expectedDestinationForCommit(action: UiActionStep, screen: UiScreenState): String? =
+        pendingExternalEffect
+            ?.takeIf { it.targetPackage == screen.packageName && isMessagingCommitBoundary(action, screen) }
+            ?.expectedDestination
+
+    private fun isMessagingCommitBoundary(action: UiActionStep, screen: UiScreenState): Boolean {
+        if (!DestinationResolver.isSupported(screen.packageName)) return false
+        val target = when (action) {
+            is UiActionStep.Tap -> action.target
+            is UiActionStep.LongPress -> action.target
+            else -> return false
+        }
+        val element = target.elementId?.let(screen::element)
+        val evidence = listOfNotNull(
+            element?.text,
+            element?.contentDescription,
+            element?.resourceId,
+            target.textContains
+        ).joinToString(" ").lowercase()
+        return SEND_TARGET_TERMS.any(evidence::contains)
+    }
+
+    private fun confirmationContentHash(action: UiActionStep, screen: UiScreenState, goal: String): String =
+        pendingExternalEffect
+            ?.takeIf { isMessagingCommitBoundary(action, screen) }
+            ?.contentHash
+            ?: if (action is UiActionStep.ShareCapturedMedia) {
+                pendingCapture?.let { AutomationMediaManager.contentSha256(context, it.uri) }
+                    ?: hashContent(action.toJson().toString(), goal)
+            } else {
+                hashContent(action.toJson().toString(), goal)
+            }
+
+    private fun goalExplicitlyNamesDestination(goal: String, destination: String): Boolean {
+        val normalizedGoal = goal.lowercase().replace(Regex("\\s+"), " ").trim()
+        val normalizedDestination = destination.lowercase().replace(Regex("\\s+"), " ").trim()
+        if (normalizedDestination.isBlank()) return false
+        if (normalizedGoal.contains(normalizedDestination)) return true
+        val destinationDigits = destination.filter(Char::isDigit)
+        return destinationDigits.length >= 7 && goal.filter(Char::isDigit).contains(destinationDigits)
+    }
+
     private fun hashContent(vararg inputs: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
         for (input in inputs) {
@@ -682,6 +843,7 @@ class UiAutomationOrchestrator(
         is UiActionStep.OpenUrl -> "open url"
         is UiActionStep.ShareText -> "share text"
         is UiActionStep.OpenCamera -> "open camera"
+        is UiActionStep.ShareCapturedMedia -> "share captured media"
     }
 
     companion object {
@@ -703,20 +865,21 @@ class UiAutomationOrchestrator(
                 }
               ]
             }
-            Allowed action values: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera.
+            Allowed action values: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera, share_captured_media.
             Copy goal and screen_id exactly. Use only a supplied element id. Never use Markdown.
         """.trimIndent()
 
         private val PLANNER_SYSTEM_PROMPT = """
             Plan one safe Android UI action. Return one JSON object only, with no Markdown.
             Required: exact supplied goal, exact screen_id, and steps containing exactly one action.
-            Actions: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera.
+            Actions: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera, share_captured_media.
             If the history of previous actions and the current screen indicate the goal is achieved, use the 'done' action.
             Targets use {"element_id":"p0"}; copy only an id supplied in elements.
             type_text requires exact text from the goal. scroll requires direction UP, DOWN, LEFT, or RIGHT.
             open_app requires package_name. open_settings_page requires page (and optional package_name for APP_DETAILS or NOTIFICATION_SETTINGS).
-            open_url requires url. share_text requires text and optional target_package.
+            open_url requires url. share_text requires text, optional target_package, and expected_destination when a final send is intended.
             open_camera requires mode (PHOTO or VIDEO) and facing (FRONT or REAR).
+            share_captured_media requires target_package and an expected_destination explicitly named by the user.
             wait uses ms. ask_user uses reason. done uses summary.
             You may append one assert step with condition containing element_id, text_contains, or checked.
 
@@ -734,6 +897,7 @@ class UiAutomationOrchestrator(
         is UiActionStep.OpenUrl,
         is UiActionStep.ShareText,
         is UiActionStep.OpenCamera,
+        is UiActionStep.ShareCapturedMedia,
         is UiActionStep.PressBack,
         is UiActionStep.PressHome,
         is UiActionStep.PressRecents,
@@ -749,4 +913,6 @@ class UiAutomationOrchestrator(
         val id = getTargetElementId(action) ?: return null
         return screen.element(id)?.let { screen.plannerLabel(it) }
     }
+
+    private val SEND_TARGET_TERMS = setOf("send", "send_message", "send button", "send_button")
 }

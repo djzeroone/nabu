@@ -132,6 +132,35 @@ class UiActionValidatorTest {
     }
 
     @Test
+    fun sendGoalDoesNotConfirmBeforeCommitBoundary() {
+        val ordinary = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val plan = UiActionPlan(
+            "Send this message after navigating to Saved Messages",
+            screen.screenId,
+            listOf(UiActionStep.Tap(UiTarget(ordinary.id, null)))
+        )
+
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
+    }
+
+    @Test
+    fun validatorRequiresConfirmationForCameraShutter() {
+        val shutter = screen.elements.first { it.text == "Send" }.copy(
+            text = "Take photo",
+            contentDescription = "Shutter",
+            resourceId = "com.camera:id/shutter_button"
+        )
+        val cameraScreen = screen.copy(elements = screen.elements + shutter.copy(id = "camera_shutter"))
+        val plan = UiActionPlan(
+            "Take a selfie",
+            cameraScreen.screenId,
+            listOf(UiActionStep.Tap(UiTarget("camera_shutter", null)))
+        )
+
+        assertTrue(UiActionValidator.validate(plan, cameraScreen) is UiPlanDecision.RequireConfirmation)
+    }
+
+    @Test
     fun parserAllowsDoneWhenGoalIsAlreadySatisfied() {
         val plan = UiActionPlanParser.parse(
             """{"goal":"Turn on dark mode","screen_id":"${screen.screenId}","steps":[

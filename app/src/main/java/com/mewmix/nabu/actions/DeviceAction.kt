@@ -2,6 +2,7 @@ package com.mewmix.nabu.actions
 
 import android.Manifest
 import android.content.Context
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
@@ -325,11 +326,16 @@ object DeviceAction {
         return launchIntent(context, intent) { "Opened navigation for $destination." }
     }
 
-    fun takePhoto(context: Context, facing: String = "UNSPECIFIED"): ActionResult {
+    fun takePhoto(context: Context, facing: String = "UNSPECIFIED", outputUri: Uri? = null): ActionResult {
         val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
             when (facing.uppercase()) {
                 "FRONT" -> putExtra("android.intent.extras.CAMERA_FACING", 1)
                 "REAR" -> putExtra("android.intent.extras.CAMERA_FACING", 0)
+            }
+            if (outputUri != null) {
+                putExtra(MediaStore.EXTRA_OUTPUT, outputUri)
+                clipData = ClipData.newRawUri("Nabu camera output", outputUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             }
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -339,11 +345,16 @@ object DeviceAction {
         return launchIntent(context, intent) { "Opened camera for photo capture." }
     }
 
-    fun recordVideo(context: Context, facing: String = "UNSPECIFIED"): ActionResult {
+    fun recordVideo(context: Context, facing: String = "UNSPECIFIED", outputUri: Uri? = null): ActionResult {
         val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
             when (facing.uppercase()) {
                 "FRONT" -> putExtra("android.intent.extras.CAMERA_FACING", 1)
                 "REAR" -> putExtra("android.intent.extras.CAMERA_FACING", 0)
+            }
+            if (outputUri != null) {
+                putExtra(MediaStore.EXTRA_OUTPUT, outputUri)
+                clipData = ClipData.newRawUri("Nabu camera output", outputUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             }
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -410,6 +421,25 @@ object DeviceAction {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return launchIntent(context, chooser) { "Opened share sheet." }
+    }
+
+    fun shareMedia(context: Context, uri: Uri, mimeType: String, targetPackage: String): ActionResult {
+        if (uri.scheme != "content") return ActionResult("Only content URIs may be shared.", true)
+        if (targetPackage.isBlank()) return ActionResult("Missing required target package for media sharing.", true)
+        if (mimeType != "image/jpeg" && mimeType != "video/mp4") {
+            return ActionResult("Unsupported media MIME type: $mimeType", true)
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            setPackage(targetPackage)
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newRawUri("Nabu shared media", uri)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        if (!canResolveIntent(context, intent)) {
+            return ActionResult("Target package '$targetPackage' cannot receive this media.", true)
+        }
+        return launchIntent(context, intent) { "Opened media composer in $targetPackage." }
     }
 
     private fun sendMediaCommand(context: Context, keyCode: Int, successMessage: String): ActionResult {

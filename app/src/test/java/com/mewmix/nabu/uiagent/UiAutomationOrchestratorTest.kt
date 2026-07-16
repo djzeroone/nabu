@@ -9,10 +9,11 @@ import org.junit.Test
 import org.mockito.Mockito.*
 
 class UiAutomationOrchestratorTest {
+
     @Test
     fun `test execution terminates gracefully when accessibility service is missing`() = runBlocking {
         val context = mock(Context::class.java)
-        
+
         val backend = object : LlmBackend {
             override fun initialize() {}
             override fun close() {}
@@ -32,7 +33,19 @@ class UiAutomationOrchestratorTest {
             requestConfirmation = { true }
         )
 
+        // Without an accessibility service, observe() returns null on the first call,
+        // so run() terminates immediately with an Accessibility Service error.
         val result = orchestrator.run("test goal")
-        assertTrue("Unexpected result: ${result.output}", result.output.contains("limit reached", ignoreCase = true) || result.output.contains("Failed to observe", ignoreCase = true) || result.output.contains("Accessibility service", ignoreCase = true))
+        assertTrue(
+            "Unexpected result: ${result.output}",
+            result.output.contains("Accessibility Service", ignoreCase = true) ||
+            result.output.contains("observe", ignoreCase = true)
+        )
     }
+
+    // TODO: Action-limit termination test belongs in the instrumentation suite because
+    // the orchestrator's observe() calls AccessibilityToolHandler which requires the
+    // live accessibility service. A unit test cannot exercise the full action loop
+    // without a mock accessibility bridge, which would require refactoring observe()
+    // to accept an injectable observation source. See docs/DEEP_AUTOMATION_SPEC.md §12.2.
 }

@@ -28,6 +28,7 @@ object AutomationIntentPolicy {
             is UiActionStep.OpenUrl -> evaluateOpenUrl(action, policyContext)
             is UiActionStep.ShareText -> evaluateShareText(action, policyContext)
             is UiActionStep.OpenCamera -> evaluateOpenCamera(action, policyContext)
+            is UiActionStep.ShareCapturedMedia -> evaluateShareCapturedMedia(action, policyContext)
             else -> IntentPolicyDecision.Allow // Internal UI actions are governed by UiActionValidator
         }
     }
@@ -98,6 +99,25 @@ object AutomationIntentPolicy {
             return IntentPolicyDecision.Block("Cannot open camera during scheduled background execution.")
         }
         return IntentPolicyDecision.Allow
+    }
+
+    private fun evaluateShareCapturedMedia(
+        action: UiActionStep.ShareCapturedMedia,
+        policyContext: PolicyContext
+    ): IntentPolicyDecision {
+        if (policyContext.isScheduled) {
+            return IntentPolicyDecision.Block("Cannot share captured media during scheduled background execution.")
+        }
+        if (action.expectedDestination.isBlank()) {
+            return IntentPolicyDecision.Block("Media sharing requires an explicit expected destination.")
+        }
+        if (!isPackageInstalled(action.targetPackage, policyContext.context)) {
+            return IntentPolicyDecision.Block("Target package '${action.targetPackage}' is not installed.")
+        }
+        return IntentPolicyDecision.RequireConfirmation(
+            "Opening a media composer with captured content",
+            "${action.expectedDestination} via ${action.targetPackage}"
+        )
     }
 
     private fun isPackageInstalled(packageName: String, context: Context): Boolean {
