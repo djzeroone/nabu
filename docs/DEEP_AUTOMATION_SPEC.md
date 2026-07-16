@@ -119,6 +119,18 @@ Requirements:
 
 ## 5. Bounded automation loop
 
+### 5.0 Cross-application transitions
+
+For multi-app goals, Nabu resolves goal-relevant launcher applications in trusted code and
+includes their labels and package names in planner state. `open_app` may only use a package
+from that resolved set, unless the user explicitly supplied the package name.
+
+After an app launch, settings intent, share intent, camera intent, global navigation action,
+or ordinary UI action, the orchestrator must not assume the next accessibility snapshot is
+already current. It polls bounded observations until the screen or foreground package changes,
+accepts intermediate Android system windows for subsequent planning, and then continues the
+same automation session in the new application.
+
 ### 5.1 Budgets
 
 Use the following defaults:
@@ -604,4 +616,3 @@ After Gemini finishes each phase, Codex should:
 6. Inspect device logs during opt-in tests.
 7. Verify generated artifacts and URI grants are cleaned.
 8. Commit only the reviewed phase.
-

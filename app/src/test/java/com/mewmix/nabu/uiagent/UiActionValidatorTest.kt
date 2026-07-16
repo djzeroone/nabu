@@ -38,15 +38,13 @@ class UiActionValidatorTest {
         assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
     }
 
-    @Test
-    fun parserReducesLongPlansToFirstAction() {
-        val plan = UiActionPlanParser.parse(
+    @Test(expected = IllegalArgumentException::class)
+    fun parserRejectsMultipleExecutableActions() {
+        UiActionPlanParser.parse(
             """{"goal":"navigate","screen_id":"${screen.screenId}","steps":[
               {"action":"press_back"},{"action":"press_home"},{"action":"wait","ms":100}
             ]}"""
         )
-
-        assertEquals(listOf(UiActionStep.PressBack), plan.steps)
     }
 
     @Test

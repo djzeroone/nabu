@@ -177,6 +177,15 @@ object DeviceAction {
     fun findAppCandidates(context: Context, appName: String): List<AppCandidate> =
         appCandidateResolver(context, appName)
 
+    fun findGoalAppCandidates(
+        context: Context,
+        goal: String,
+        limit: Int = 12
+    ): List<AppCandidate> = runCatching {
+        rankGoalAppCandidates(goal, listLaunchableApps(context))
+            .take(limit.coerceAtLeast(0))
+    }.getOrDefault(emptyList())
+
     fun openUrl(context: Context, url: String): ActionResult {
         if (url.isBlank()) return ActionResult("Missing required parameter: url", true)
         val normalizedUrl = normalizeUrl(url)
@@ -557,19 +566,22 @@ object DeviceAction {
     }
 
     private fun findLaunchableApps(context: Context, appName: String): List<AppCandidate> {
-        val packageManager = context.packageManager
-        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val query = normalizeAppName(appName)
         if (query.isBlank()) return emptyList()
+        return rankAppCandidates(query, listLaunchableApps(context))
+    }
 
-        val installedApps = packageManager.queryIntentActivities(launcherIntent, 0)
+    private fun listLaunchableApps(context: Context): List<AppCandidate> {
+        val packageManager = context.packageManager
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return packageManager.queryIntentActivities(launcherIntent, 0)
             .mapNotNull { resolveInfo ->
                 val packageName = resolveInfo.activityInfo?.packageName ?: return@mapNotNull null
                 val label = resolveInfo.loadLabel(packageManager)?.toString()?.trim().orEmpty()
                 if (label.isBlank()) return@mapNotNull null
                 AppCandidate(label, packageName)
             }
-        return rankAppCandidates(query, installedApps)
+            .distinctBy(AppCandidate::packageName)
     }
 
     internal fun rankAppCandidates(appName: String, candidates: List<AppCandidate>): List<AppCandidate> {
@@ -591,11 +603,61 @@ object DeviceAction {
             .map { it.second }
     }
 
+    internal fun rankGoalAppCandidates(
+        goal: String,
+        candidates: List<AppCandidate>
+    ): List<AppCandidate> {
+        val normalizedGoal = normalizeAppName(goal)
+        if (normalizedGoal.isBlank()) return emptyList()
+        val goalTokens = normalizedGoal.split(' ')
+            .filter(String::isNotBlank)
+            .map(::singularizeToken)
+            .toSet()
+        val paddedGoal = " $normalizedGoal "
+        return candidates
+            .mapNotNull { candidate ->
+                val normalizedLabel = normalizeAppName(candidate.label)
+                if (normalizedLabel.isBlank()) return@mapNotNull null
+                val labelTokens = normalizedLabel.split(' ')
+                    .filter(String::isNotBlank)
+                    .map(::singularizeToken)
+                    .filter { it.length >= 3 && it !in COMMON_APP_TOKENS }
+                val matchingTokens = labelTokens.count(goalTokens::contains)
+                val packageTokenMatch = candidate.packageName
+                    .lowercase()
+                    .split('.', '_')
+                    .map(::singularizeToken)
+                    .any { it.length >= 3 && it !in COMMON_APP_TOKENS && it in goalTokens }
+                val score = when {
+                    paddedGoal.contains(" $normalizedLabel ") -> 2_000 + normalizedLabel.length
+                    labelTokens.isNotEmpty() && matchingTokens == labelTokens.size ->
+                        1_500 + matchingTokens * 20
+                    matchingTokens > 0 -> 1_000 + matchingTokens * 20
+                    packageTokenMatch -> 700
+                    else -> 0
+                }
+                if (score == 0) null else score to candidate
+            }
+            .distinctBy { it.second.packageName }
+            .sortedWith(
+                compareByDescending<Pair<Int, AppCandidate>> { it.first }
+                    .thenBy { it.second.label.lowercase() }
+            )
+            .map(Pair<Int, AppCandidate>::second)
+    }
+
     private fun normalizeAppName(value: String): String = value
         .trim()
         .lowercase()
         .replace(Regex("[^a-z0-9]+"), " ")
         .trim()
+
+    private fun singularizeToken(value: String): String =
+        if (value.length >= 5 && value.endsWith('s')) value.dropLast(1) else value
+
+    private val COMMON_APP_TOKENS = setOf(
+        "android", "app", "google", "microsoft", "mobile", "service"
+    )
 
     private fun appMatchScore(query: String, label: String, packageName: String): Int {
         if (label == query) return 1_000

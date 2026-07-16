@@ -26,6 +26,122 @@ class UiActionPlanParserTest {
     }
 
     @Test
+    fun `normalizes common open app package aliases`() {
+        val targetPackagePlan = UiActionPlanParser.parsePlannerOutput(
+            """{"action":"open_app","target_package":"com.google.android.youtube"}""",
+            "Open YouTube",
+            "screen1"
+        )
+        val nestedPackagePlan = UiActionPlanParser.parsePlannerOutput(
+            """{"action":"open_app","target":{"package_name":"com.oneplus.calculator"}}""",
+            "Open Calculator",
+            "screen1"
+        )
+
+        assertEquals(
+            "com.google.android.youtube",
+            (targetPackagePlan.steps.single() as UiActionStep.OpenApp).packageName
+        )
+        assertEquals(
+            "com.oneplus.calculator",
+            (nestedPackagePlan.steps.single() as UiActionStep.OpenApp).packageName
+        )
+    }
+
+    @Test
+    fun `repairs malformed local planner package pair`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            """{"action":"open_app","package","com.oneplus.calculator"}""",
+            "Open Calculator",
+            "screen1"
+        )
+
+        assertEquals(
+            "com.oneplus.calculator",
+            (plan.steps.single() as UiActionStep.OpenApp).packageName
+        )
+    }
+
+    @Test
+    fun `ignores harmless ui target fields on open app`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            """{"action":"open_app","element_id":"p0","package_name":"com.google.android.youtube"}""",
+            "Open YouTube",
+            "screen1"
+        )
+
+        assertEquals(
+            "com.google.android.youtube",
+            (plan.steps.single() as UiActionStep.OpenApp).packageName
+        )
+    }
+
+    @Test
+    fun `ignores harmless planner metadata`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            """
+            {
+              "action":"tap",
+              "target":{"element_id":"p0"},
+              "action_description":"Tap the selected item",
+              "detail":{"screen_id":"screen1"}
+            }
+            """.trimIndent(),
+            "Tap the item",
+            "screen1"
+        )
+
+        assertTrue(plan.steps.single() is UiActionStep.Tap)
+    }
+
+    @Test
+    fun `accepts plain done shorthand`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            "done",
+            "Open YouTube then Calculator",
+            "screen1"
+        )
+
+        assertTrue(plan.steps.single() is UiActionStep.Done)
+    }
+
+    @Test
+    fun `uses first action from a top level receding horizon array`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            """
+            [
+              {"action":"open_app","package_name":"com.google.android.youtube"},
+              {"action":"wait","ms":30},
+              {"action":"open_app","package":"com.oneplus.calculator"}
+            ]
+            """.trimIndent(),
+            "Open YouTube then Calculator",
+            "screen1"
+        )
+
+        assertEquals(
+            "com.google.android.youtube",
+            (plan.steps.single() as UiActionStep.OpenApp).packageName
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `rejects multiple executable actions`() {
+        UiActionPlanParser.parsePlannerOutput(
+            """
+            {
+              "steps": [
+                {"action":"tap","target":{"element_id":"p0"}},
+                {"action":"open_app","package_name":"com.oneplus.calculator"}
+              ]
+            }
+            """.trimIndent(),
+            "Open Calculator",
+            "screen1"
+        )
+    }
+
+    @Test
     fun `parses enums correctly`() {
         val plan = UiActionPlanParser.parsePlannerOutput(
             """

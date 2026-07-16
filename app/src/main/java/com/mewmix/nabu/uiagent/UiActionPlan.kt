@@ -66,7 +66,15 @@ data class UiAssertion(
 
 object UiActionPlanParser {
     fun parsePlannerOutput(rawJson: String, knownGoal: String, knownScreenId: String): UiActionPlan {
-        val root = JsonParser.parseString(rawJson).asJsonObject
+        val parsed = JsonParser.parseString(repairCommonPlannerJson(normalizePlannerShorthand(rawJson)))
+        val root = when {
+            parsed.isJsonObject -> parsed.asJsonObject
+            parsed.isJsonArray -> {
+                require(parsed.asJsonArray.size() > 0) { "Planner action array is empty." }
+                parsed.asJsonArray.first().asJsonObject.deepCopy()
+            }
+            else -> error("Planner output must be a JSON object or action array.")
+        }
         root.addProperty("goal", knownGoal)
         root.addProperty("screen_id", knownScreenId)
         if (!root.has("steps") && root.has("action")) {
@@ -80,7 +88,7 @@ object UiActionPlanParser {
     }
 
     fun parse(rawJson: String): UiActionPlan {
-        val root = JsonParser.parseString(rawJson).asJsonObject
+        val root = JsonParser.parseString(repairCommonPlannerJson(rawJson)).asJsonObject
         val goal = root.requiredString("goal")
         val screenId = root.requiredString("screen_id")
         val rawSteps = root.optJsonArray("steps")
@@ -88,11 +96,13 @@ object UiActionPlanParser {
             ?: error("Missing steps array.")
         require(rawSteps.size() > 0) { "A plan must contain at least one step." }
         val normalizedSteps = rawSteps.map { normalizeStepEnvelope(it.asJsonObject.deepCopy()) }
-        val actionJson = normalizedSteps.firstOrNull {
+        val actionJsons = normalizedSteps.filter {
             normalizeAction(it.requiredString("action"), it) != "assert"
         }
-            ?: error("A plan must contain at least one non-assert action.")
-        val action = parseStep(actionJson)
+        require(actionJsons.size == 1) {
+            "A plan must contain exactly one non-assert action; found ${actionJsons.size}."
+        }
+        val action = parseStep(actionJsons.single())
         val assertion = normalizedSteps.lastOrNull {
             normalizeAction(it.requiredString("action"), it) == "assert"
         }?.let(::parseStep) as? UiActionStep.Assert
@@ -160,6 +170,33 @@ object UiActionPlanParser {
     private fun normalizeStepEnvelope(step: JsonObject): JsonObject {
         val action = normalizeAction(step.get("action")?.asString.orEmpty(), step)
         step.addProperty("action", action)
+        PLANNER_METADATA_KEYS.forEach(step::remove)
+        if (action == "open_app" && !step.has("package_name")) {
+            step.remove("target_package")?.let { step.add("package_name", it) }
+            if (!step.has("package_name")) {
+                step.remove("package")?.let { step.add("package_name", it) }
+            }
+            if (!step.has("package_name")) {
+                step.optJsonObject("target")?.let { target ->
+                    target.remove("package_name")?.let { step.add("package_name", it) }
+                    if (!step.has("package_name")) {
+                        target.remove("target_package")?.let { step.add("package_name", it) }
+                    }
+                    if (!step.has("package_name")) {
+                        target.remove("package")?.let { step.add("package_name", it) }
+                    }
+                    if (target.size() == 0) step.remove("target")
+                }
+            }
+        }
+        if (action in NON_TARGET_ACTIONS) {
+            UI_TARGET_KEYS.forEach(step::remove)
+            step.optJsonObject("target")?.let { target ->
+                if (target.keySet().all(UI_TARGET_KEYS::contains)) {
+                    step.remove("target")
+                }
+            }
+        }
         if (action in TARGET_ACTIONS && !step.has("target")) {
             val target = JsonObject()
             step.remove("element_id")?.let { target.add("element_id", it) }
@@ -183,6 +220,18 @@ object UiActionPlanParser {
         }
         return step
     }
+
+    private fun repairCommonPlannerJson(rawJson: String): String =
+        MALFORMED_PACKAGE_PAIR.replace(rawJson) { match ->
+            """"package_name":"${match.groupValues[1]}""""
+        }
+
+    private fun normalizePlannerShorthand(rawJson: String): String =
+        if (rawJson.trim().equals("done", ignoreCase = true)) {
+            """{"action":"done","summary":"Completed the requested UI workflow."}"""
+        } else {
+            rawJson
+        }
 
     private fun normalizeAction(action: String, step: JsonObject? = null): String {
         val normalized = normalizeActionToken(action)
@@ -225,6 +274,20 @@ object UiActionPlanParser {
     }
 
     private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll")
+    private val UI_TARGET_KEYS = setOf(
+        "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label"
+    )
+    private val PLANNER_METADATA_KEYS = setOf(
+        "action_description", "description", "detail", "rationale", "reasoning"
+    )
+    private val NON_TARGET_ACTIONS = setOf(
+        "press_back", "press_home", "press_recents", "open_notifications", "open_quick_settings",
+        "wait", "ask_user", "done", "open_app", "open_settings_page", "open_url",
+        "share_text", "open_camera", "share_captured_media"
+    )
+    private val MALFORMED_PACKAGE_PAIR = Regex(
+        """"(?:package|package_name|target_package)"\s*,\s*"([^"]+)""""
+    )
     private val SUPPORTED_ACTIONS = TARGET_ACTIONS +
         setOf(
             "press_back", "press_home", "press_recents", "open_notifications", "open_quick_settings",
