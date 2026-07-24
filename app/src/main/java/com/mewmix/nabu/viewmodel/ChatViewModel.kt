@@ -236,6 +236,7 @@ class ChatViewModel(
             val responseParts = mutableListOf<String>()
             var lastActionSubject: ToolCall? = null
             var lastTimedHoldInverse: ToolCall? = null
+            var allClausesParsed = true
             clauses.forEach { clause ->
                 val trimmedClause = clause.trim().trimEnd('.', '!', '?')
                 if (trimmedClause.isBlank()) return@forEach
@@ -260,13 +261,21 @@ class ChatViewModel(
                     return@forEach
                 }
 
-                inferToolCallFromModelFailure(resolvedClause, availableToolNames)?.let {
+                val inferredClause = inferToolCallFromModelFailure(resolvedClause, availableToolNames)
+                inferredClause?.let {
                     if (it == lastTimedHoldInverse) return@forEach
                     toolCalls += it
                     subjectForPronouns(it)?.let { subject -> lastActionSubject = subject }
+                    return@forEach
                 }
+
+                // A partial deterministic chain is more dangerous than no chain: dropping an
+                // unmatched middle instruction changes the user's goal while later actions still
+                // run. Let the full request fall through to the model/planner instead.
+                allClausesParsed = false
             }
 
+            if (!allClausesParsed) return null
             if (toolCalls.size < 2 && responseParts.isEmpty()) return null
             if (toolCalls.isEmpty()) return null
 
@@ -507,6 +516,15 @@ class ChatViewModel(
                     }
             }
 
+            if (UiAutomationOrchestrator.CONTROL_UI_TOOL in availableToolNames &&
+                looksLikeCompoundAppUiRequest(normalized)
+            ) {
+                return ToolCall(
+                    UiAutomationOrchestrator.CONTROL_UI_TOOL,
+                    mapOf("goal" to normalized)
+                )
+            }
+
             if ("open_app" in availableToolNames || "launch_package" in availableToolNames) {
                 Regex("""(?is)^\s*(?:open|launch)(?:\s+(?:app|application|package))?\s+(.+?)\s*$""").find(normalized)?.groupValues?.getOrNull(1)?.trim()
                     ?.takeIf { it.isNotBlank() }
@@ -692,6 +710,18 @@ class ChatViewModel(
                 """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:control[\s_-]*ui|ui\s+automation)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.+?)\s*$"""
             ).find(userMessage) ?: return null
             return match.groupValues[1].trim().takeIf { it.isNotEmpty() }
+        }
+
+        private fun looksLikeCompoundAppUiRequest(userMessage: String): Boolean {
+            if (!Regex("""(?is)^\s*(?:open|launch)(?:\s+(?:app|application|package))?\s+\S+""")
+                    .containsMatchIn(userMessage)
+            ) {
+                return false
+            }
+
+            return Regex(
+                """(?is)(?:[,;.]|\b(?:and(?:\s+then)?|then)\b)\s*(?:search|find|tap|press|click|select|choose|type|enter|write|scroll|swipe|open|send|compose|toggle|turn|navigate|go)\b"""
+            ).containsMatchIn(userMessage)
         }
 
         private fun parseAlarmFallback(normalized: String): ToolCall? {

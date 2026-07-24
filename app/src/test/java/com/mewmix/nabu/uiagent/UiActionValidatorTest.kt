@@ -38,13 +38,18 @@ class UiActionValidatorTest {
         assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(plan, screen))
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun parserRejectsMultipleExecutableActions() {
-        UiActionPlanParser.parse(
+    @Test
+    fun validatorChecksOnlyCurrentExecutionSliceFromMultipleActions() {
+        val horizon = UiActionPlanParser.parse(
             """{"goal":"navigate","screen_id":"${screen.screenId}","steps":[
               {"action":"press_back"},{"action":"press_home"},{"action":"wait","ms":100}
             ]}"""
         )
+
+        assertEquals(3, horizon.executableSteps.size)
+        val current = horizon.firstExecutionSlice()
+        assertEquals(listOf(UiActionStep.PressBack), current.steps)
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(current, screen))
     }
 
     @Test

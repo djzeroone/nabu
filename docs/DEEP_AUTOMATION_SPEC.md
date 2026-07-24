@@ -616,3 +616,79 @@ After Gemini finishes each phase, Codex should:
 6. Inspect device logs during opt-in tests.
 7. Verify generated artifacts and URI grants are cleaned.
 8. Commit only the reviewed phase.
+
+## 17. UI automation TODO: end-to-end device control
+
+Active product focus: reliable, deep UI and application control. Work on the update
+checker, TTS, audio decoding, theme export, and API background service is parked while
+this backlog is active. Authorization headers must still be redacted because automation
+traces cannot be safe or shareable otherwise.
+
+The executor continues to validate and execute exactly one UI mutation against one fresh
+observation. The planner is no longer required to pretend that a deep workflow consists
+of one step. It may return a bounded horizon of subgoals or candidate actions. Nabu keeps
+that horizon as intent, executes only the next validated action, observes the result, and
+then revalidates, repairs, or discards the remaining queue. A response containing two,
+three, five, or more non-assert actions must not fail merely because it described a chain;
+the chain must never be batch-executed against stale UI state.
+
+### 17.1 Prioritized backlog
+
+| Priority | Status | Work item | Failure being addressed | Required outcome / acceptance test |
+| --- | --- | --- | --- | --- |
+| P0 | IN PROGRESS | Structured automation trace | Current persisted logs are stale and do not show the new cross-app runs, making repeated failures impossible to correlate. | Every run records a session ID, goal, foreground package/window, observation ID, raw planner output, parsed action count, queue revision, validation result, execution result, postcondition, timing, and terminal reason. Secrets and message contents are redacted or hashed. |
+| P0 | IN PROGRESS | Hierarchical plan plus receding-horizon executor | Planner output with 2, 3, 5, or more non-assert actions is rejected, while forcing a one-step plan loses the route needed for deep navigation. | Accept a bounded ordered horizon, execute one action per fresh observation, and revalidate the remaining intent. A stale downstream action is repaired or discarded rather than executed or treated as a parser failure. |
+| P0 | IN PROGRESS | Single session owner and command arbitration | A new chat turn, scheduled action, model callback, or queued request can override or collide with an automation run. The current global mutex only rejects the collision and does not define queue semantics. | Add an `AutomationSessionManager` with one device-control owner, FIFO pending goals, explicit cancel/replace, lifecycle-independent run state, and exactly one terminal result per goal. New input never silently replaces an active run. |
+| P0 | TODO | Goal and checkpoint state machine | Flat action history does not preserve which application, screen, destination, and commit boundary the workflow is trying to reach. | Represent the workflow as checkpoints such as `Telegram open -> chat list -> destination verified -> composer focused -> text verified -> send confirmed -> sent verified`. Resume from the current verified checkpoint after every replan or app switch. |
+| P0 | TODO | Observation recovery and window stabilization | App launches and navigation can temporarily produce no accessibility root, the old window, IME windows, permission controllers, dialogs, or loading surfaces. | Poll a bounded sequence of window states, classify transient/system/target windows, retain the last trusted state for diagnostics, and continue once the foreground state settles. A transient missing root does not terminate the run. |
+| P0 | IN PROGRESS | Semantic target resolver with uniqueness | Telegram rows and chat headers often expose text on descendants while the actionable node is an unlabeled ancestor; repeated labels can match several nodes. | Resolve targets using resource ID, text/content description, ancestor/descendant/sibling labels, bounds, role, package, and list-row grouping. Require a unique high-confidence destination before tapping a chat. Report all ambiguous candidates instead of choosing one. |
+| P0 | IN PROGRESS | Reliable input focus and text verification | Tapping arbitrary inputs and typing is unreliable when the editable node is nested, unfocused, covered by the keyboard, or replaced after navigation. | Resolve the editable node, focus it, perform `ACTION_SET_TEXT`, fall back to a validated accessibility input path, re-observe, and verify normalized text before continuing. Never mark typing successful solely because the action call returned true. |
+| P0 | IN PROGRESS | Postcondition-driven progress | Optional trailing assertions are treated as a terminal success, while actions without assertions can consume the budget without proving useful progress. | Every action type has an expected effect and verifier. Assertions verify a checkpoint rather than automatically completing the whole goal. Progress requires a package/window/state, focus, text, checked-state, or destination change tied to the current checkpoint. |
+| P0 | TODO | Failure recovery policy | A failed tap or unchanged screen currently tends to spend another planner turn without targeted recovery. | Classify `stale target`, `not clickable`, `ambiguous`, `covered`, `loading`, `wrong screen`, `IME`, and `no root`; apply one bounded recovery strategy per class; then replan with the structured failure. Never repeat the same failed action unchanged. |
+| P1 | IN PROGRESS | Telegram deterministic navigator | Opening Telegram is easy, but finding a chat, distinguishing search results, entering the right conversation, and locating the composer is not reliable. | Add a Telegram state detector and navigator for chat list, search UI, search results, chat screen, composer, and send state. First live target is Saved Messages; human/group destinations remain blocked unless uniquely verified. |
+| P1 | TODO | Telegram end-to-end send workflow | The system cannot reliably chain app launch, destination selection, input, confirmation, send, and verification. | On an unlocked authenticated device, send a runtime-unique message to Saved Messages only after just-in-time confirmation, then verify the outgoing bubble text and destination. No other chat may be opened or messaged. |
+| P1 | TODO | Scroll/search memory for deep lists | Deep lists cause repeated taps or scrolls because the planner does not remember searched ranges or distinguish movement from progress. | Track list identity, scroll direction, visible item signatures, visited ranges, and end-of-list detection. Stop cycling; switch to app search when bounded scrolling cannot locate a unique target. |
+| P1 | TODO | App-switch and task-stack continuity | The automation coroutine and queued intent can lose continuity when another application becomes foreground or Android inserts an intermediate window. | Preserve the same session across Nabu, launcher, target apps, chooser/system UI, and return navigation. Verify package transitions and invalidate only targets tied to the old observation. |
+| P1 | TODO | Adaptive depth budget | A flat 12-action limit is too small for realistic app search and compose flows, but a large blind limit would permit loops. | Budget by checkpoint and demonstrated progress, with a hard overall ceiling below 50. Progress can extend a stage; unchanged or repeated states cannot. Trace both stage and total consumption. |
+| P1 | TODO | Confirmation that pauses rather than destroys the queue | Waiting for send confirmation can allow state drift or lose the planned continuation. | Pause the owning session, bind approval to destination/content/screen, re-observe on approval, and resume the same checkpoint. If state changed, invalidate approval and recover without losing the goal. |
+| P1 | TODO | Foreground interference handling | User taps, notifications, incoming calls, keyboards, and other app launches can override queued automation actions. | Detect unexpected foreground/window changes before every execution. Pause and recover for benign interference; request user direction for persistent interference; never continue executing the old queue. |
+| P2 | TODO | Generic application state adapters | Purely generic accessibility reasoning is expensive and brittle for deep workflows in frequently used apps. | Define a narrow adapter interface for package-specific state recognition and semantic targets while retaining the generic executor and safety policy. Telegram is the first adapter; Calculator remains the simple control fixture. |
+| P2 | TODO | Fixture corpus from real screens | Unit tests cover parser and transition policy but not the difficult Telegram trees and window sequences. | Add redacted XML fixtures for Telegram chat list/search/results/chat/composer/sent states, IME overlays, dialogs, stale windows, and missing-root recovery. Test multiple layouts and font/display scales. |
+| P2 | TODO | Replayable orchestrator tests | The orchestrator directly owns observation and execution, preventing deep deterministic unit tests. | Inject observation, action, clock, and planner interfaces. Replay full traces, including 20+ observations, queue repair, interference, cancellation, and recovery without a physical device. |
+| P2 | TODO | Opt-in physical-device reliability suite | One successful Calculator run does not demonstrate deep control. | Run Telegram Saved Messages and representative multi-app workflows repeatedly on the target device. Record completion rate, wrong-target rate, recovery count, actions, planner retries, and duration. Require zero wrong-recipient sends. |
+
+### 17.2 Delivery order
+
+1. Build the structured trace and replay seams first so every later failure is observable.
+2. Add session ownership, queue arbitration, hierarchical checkpoints, and receding-horizon execution.
+3. Harden observation, semantic target resolution, input verification, postconditions, and recovery.
+4. Implement the Telegram state adapter and Saved Messages workflow.
+5. Add adaptive depth budgets, interference recovery, fixtures, replay tests, and repeated live verification.
+
+### 17.3 Definition of deep control
+
+The automation is not considered deep because it can launch an app or tap a calculator
+button. It is deep only when one owned session can navigate an unfamiliar starting state,
+identify the correct application surface and destination, manipulate arbitrary non-secret
+inputs, recover from asynchronous window changes, pause safely for confirmation, complete
+the external effect, and verify the requested end state without executing stale queued
+actions.
+
+### 17.4 Current implementation checkpoint
+
+- Bounded horizons of up to six actions are accepted from either `steps` or top-level arrays.
+- Only the first action and its immediate assertion are validated against the current screen.
+- Malformed speculative actions after a valid prefix are discarded and replanned.
+- Matching assertions verify a checkpoint; only an explicit `done` action completes the goal.
+- Concurrent automation sessions wait in a visible queue instead of failing immediately.
+- Locked devices are rejected before observation or planning.
+- Structured trace events include session, observation, planner, execution, transition,
+  postcondition, terminal, and cleanup data; goal, planner output, destinations, and message
+  content are hashed/redacted.
+- Editable hints and focus state are indexed. Typed text is re-verified against the same
+  control by resource ID, tree path, or class/bounds after its element ID changes.
+- Telegram package/surface detection exposes only unique Saved Messages, search, composer,
+  and Send targets. Ambiguous target counts are exposed to the planner instead of selecting
+  one.
+- Physical Telegram fixture capture and live verification remain pending while the target
+  device is dozing and locked; automation must not bypass that state.

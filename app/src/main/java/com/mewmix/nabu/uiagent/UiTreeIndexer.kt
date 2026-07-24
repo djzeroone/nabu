@@ -34,6 +34,7 @@ object UiTreeIndexer {
             val text = element.attributeOrNull("text")
             val contentDescription = element.attributeOrNull("content-desc")
                 ?: element.attributeOrNull("contentDescription")
+            val hintText = element.attributeOrNull("hint")
             val resourceId = element.attributeOrNull("resource-id")
                 ?: element.attributeOrNull("view-id")
             val className = element.attributeOrNull("class")
@@ -65,7 +66,11 @@ object UiTreeIndexer {
                 checked = element.booleanAttribute("checked"),
                 password = element.booleanAttribute("password"),
                 parentId = parentId,
-                treePath = path
+                treePath = path,
+                hintText = hintText,
+                focusable = element.booleanAttribute("focusable"),
+                focused = element.booleanAttribute("focused"),
+                selected = element.booleanAttribute("selected")
             )
 
             var childIndex = 0

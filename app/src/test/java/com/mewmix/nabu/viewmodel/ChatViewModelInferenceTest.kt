@@ -267,6 +267,32 @@ class ChatViewModelInferenceTest {
     }
 
     @Test
+    fun inferToolCallFromModelFailure_routesCompoundAppInteractionToPlanner() {
+        val request = "Open Telegram and search for Saved Messages. Open it and type a draft."
+
+        assertEquals(
+            ToolCall(
+                UiAutomationOrchestrator.CONTROL_UI_TOOL,
+                mapOf("goal" to request)
+            ),
+            ChatViewModel.inferToolCallFromModelFailure(
+                userMessage = request,
+                availableToolNames = setOf("open_app", UiAutomationOrchestrator.CONTROL_UI_TOOL)
+            )
+        )
+    }
+
+    @Test
+    fun planDirectActionChain_rejectsPartialCompoundUiPlan() {
+        assertNull(
+            ChatViewModel.planDirectActionChain(
+                userMessage = "Open Telegram and search for Saved Messages. Open it and type a draft.",
+                availableToolNames = setOf("open_app", UiAutomationOrchestrator.CONTROL_UI_TOOL)
+            )
+        )
+    }
+
+    @Test
     fun inferToolCallFromModelFailure_routesVisibleUiGoalToPlanner() {
         assertEquals(
             ToolCall(

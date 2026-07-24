@@ -6,6 +6,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UiTreeIndexerTest {
+
+    @Test
+    fun `captures editable hint and focus state`() {
+        val screen = UiTreeIndexer.parse(
+            """<hierarchy><node package="p" class="android.widget.EditText" hint="Message" editable="true" focusable="true" focused="true" selected="true" bounds="[0,0][100,50]"/></hierarchy>"""
+        )
+
+        val input = screen.elements.single()
+        assertEquals("Message", input.hintText)
+        assertTrue(input.focusable)
+        assertTrue(input.focused)
+        assertTrue(input.selected)
+        assertEquals("Message", screen.plannerLabel(input))
+    }
     private val xml = """
         <hierarchy>
           <node package="com.android.settings" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" enabled="true">

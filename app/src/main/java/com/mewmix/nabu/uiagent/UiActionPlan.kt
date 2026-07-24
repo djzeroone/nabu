@@ -8,7 +8,26 @@ data class UiActionPlan(
     val goal: String,
     val screenId: String,
     val steps: List<UiActionStep>
-)
+) {
+    val executableSteps: List<UiActionStep>
+        get() = steps.filterNot { it is UiActionStep.Assert }
+
+    /**
+     * Returns the only portion of a planner horizon that may be validated and executed
+     * against the current observation: its first mutation and an immediately following
+     * postcondition. Remaining actions are intent only and must be replanned after the UI
+     * is observed again.
+     */
+    fun firstExecutionSlice(): UiActionPlan {
+        val firstActionIndex = steps.indexOfFirst { it !is UiActionStep.Assert }
+        require(firstActionIndex >= 0) { "A plan must contain an executable action." }
+        val slice = mutableListOf(steps[firstActionIndex])
+        steps.getOrNull(firstActionIndex + 1)
+            ?.takeIf { it is UiActionStep.Assert }
+            ?.let(slice::add)
+        return copy(steps = slice)
+    }
+}
 
 sealed interface UiActionStep {
     data class Tap(val target: UiTarget) : UiActionStep
@@ -71,7 +90,11 @@ object UiActionPlanParser {
             parsed.isJsonObject -> parsed.asJsonObject
             parsed.isJsonArray -> {
                 require(parsed.asJsonArray.size() > 0) { "Planner action array is empty." }
-                parsed.asJsonArray.first().asJsonObject.deepCopy()
+                JsonObject().apply {
+                    add("steps", JsonArray().also { steps ->
+                        parsed.asJsonArray.forEach { steps.add(it.asJsonObject.deepCopy()) }
+                    })
+                }
             }
             else -> error("Planner output must be a JSON object or action array.")
         }
@@ -99,14 +122,30 @@ object UiActionPlanParser {
         val actionJsons = normalizedSteps.filter {
             normalizeAction(it.requiredString("action"), it) != "assert"
         }
-        require(actionJsons.size == 1) {
-            "A plan must contain exactly one non-assert action; found ${actionJsons.size}."
+        require(actionJsons.isNotEmpty()) { "A plan must contain at least one non-assert action." }
+        require(actionJsons.size <= MAX_HORIZON_ACTIONS) {
+            "A plan horizon may contain at most $MAX_HORIZON_ACTIONS non-assert actions; found ${actionJsons.size}."
         }
-        val action = parseStep(actionJsons.single())
-        val assertion = normalizedSteps.lastOrNull {
-            normalizeAction(it.requiredString("action"), it) == "assert"
-        }?.let(::parseStep) as? UiActionStep.Assert
-        return UiActionPlan(goal, screenId, listOfNotNull(action, assertion))
+        val parsedSteps = mutableListOf<UiActionStep>()
+        for (stepJson in normalizedSteps) {
+            val parsedStepResult = runCatching { parseStep(stepJson) }
+            if (parsedStepResult.isFailure) {
+                if (parsedSteps.any { it !is UiActionStep.Assert }) break
+                throw parsedStepResult.exceptionOrNull()!!
+            }
+            val parsedStep = parsedStepResult.getOrThrow()
+            if (parsedStep is UiActionStep.Assert &&
+                (parsedSteps.isEmpty() || parsedSteps.last() is UiActionStep.Assert)
+            ) {
+                if (parsedSteps.any { it !is UiActionStep.Assert }) break
+                throw IllegalArgumentException("A plan horizon cannot begin with an assertion.")
+            }
+            parsedSteps += parsedStep
+        }
+        require(parsedSteps.any { it !is UiActionStep.Assert }) {
+            "A plan must contain an executable action."
+        }
+        return UiActionPlan(goal, screenId, parsedSteps)
     }
 
     private fun checkKeys(json: JsonObject, vararg allowedKeys: String) {
@@ -294,6 +333,8 @@ object UiActionPlanParser {
             "wait", "assert", "ask_user", "done",
             "open_app", "open_settings_page", "open_url", "share_text", "open_camera", "share_captured_media"
         )
+
+    internal const val MAX_HORIZON_ACTIONS = 6
 
     private fun parseTarget(json: JsonObject?): UiTarget? {
         if (json == null) return null

@@ -28,7 +28,11 @@ data class UiElement(
     val checked: Boolean,
     val password: Boolean,
     val parentId: String?,
-    val treePath: String
+    val treePath: String,
+    val hintText: String? = null,
+    val focusable: Boolean = false,
+    val focused: Boolean = false,
+    val selected: Boolean = false
 )
 
 data class UiScreenState(
@@ -56,7 +60,7 @@ data class UiScreenState(
 
     fun plannerLabel(element: UiElement): String? {
         val labels = linkedSetOf<String>()
-        listOfNotNull(element.text, element.contentDescription)
+        listOfNotNull(element.text, element.contentDescription, element.hintText)
             .map(String::trim)
             .filter(String::isNotEmpty)
             .forEach(labels::add)
@@ -69,7 +73,43 @@ data class UiScreenState(
             .filter(String::isNotEmpty)
             .take(4)
             .forEach(labels::add)
+        if (!element.scrollable && (labels.isEmpty() || element.editable)) {
+            nearestAncestor(element, maxDepth = 2)?.let { ancestor ->
+                elements.asSequence()
+                    .filter { candidate ->
+                        candidate.visible &&
+                            candidate.id != element.id &&
+                            isDescendantOf(candidate, ancestor.id, maxDepth = 3)
+                    }
+                    .flatMap { candidate ->
+                        sequenceOf(candidate.text, candidate.contentDescription, candidate.hintText)
+                    }
+                    .filterNotNull()
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .take(2)
+                    .forEach(labels::add)
+            }
+        }
         return labels.takeIf { it.isNotEmpty() }?.joinToString(" | ")
+    }
+
+    private fun nearestAncestor(element: UiElement, maxDepth: Int): UiElement? {
+        var parentId = element.parentId
+        repeat(maxDepth) {
+            val parent = parentId?.let { id -> elements.firstOrNull { it.id == id } } ?: return null
+            if (isCompactContextContainer(parent, element)) return parent
+            parentId = parent.parentId
+        }
+        return null
+    }
+
+    private fun isCompactContextContainer(parent: UiElement, child: UiElement): Boolean {
+        val parentBounds = parent.bounds ?: return false
+        val childBounds = child.bounds ?: return false
+        val parentHeight = parentBounds.bottom - parentBounds.top
+        val childHeight = childBounds.bottom - childBounds.top
+        return parentHeight <= maxOf(600, childHeight * 6)
     }
 
     private fun isDescendantOf(candidate: UiElement, ancestorId: String, maxDepth: Int): Boolean {

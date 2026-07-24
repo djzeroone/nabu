@@ -55,19 +55,44 @@ class UiAutomationOrchestrator(
     private val pendingMediaUris = linkedSetOf<Uri>()
     private var pendingCapture: PendingCapture? = null
     private var pendingExternalEffect: PendingExternalEffect? = null
+    private var activeTrace: AutomationTraceRecorder? = null
 
     suspend fun run(goal: String): ToolResult {
-        if (!sessionMutex.tryLock()) {
-            return failure("Automation session is already running. Please wait or cancel the existing session.")
-        }
         val sessionId = UUID.randomUUID().toString()
+        val trace = AutomationTraceRecorder(sessionId, logger)
+        trace.emit("session_requested", mapOf("goal" to goal, "scheduled" to isScheduled))
+        if (!sessionMutex.tryLock()) {
+            onProgress("Queue", "Waiting for the active device-control session to finish")
+            trace.emit("session_queued", mapOf("reason_code" to "device_control_owned"))
+            sessionMutex.lock()
+            trace.emit("session_dequeued")
+        }
+        activeTrace = trace
         return try {
-            runWithCleanup(goal, sessionId)
+            trace.emit("session_started")
+            runWithCleanup(goal, sessionId).also { result ->
+                trace.emit(
+                    "session_finished",
+                    mapOf(
+                        "status" to if (result.isError) "failed" else "succeeded",
+                        "result_length" to result.output.length,
+                        "result_hash" to hashContent(result.output)
+                    )
+                )
+            }
         } finally {
             withContext(NonCancellable) {
                 cleanupArtifacts(pendingArtifactPaths.toList())
                 AutomationMediaManager.cleanupAll(context, pendingMediaUris.toList())
                 pendingMediaUris.clear()
+                trace.emit(
+                    "session_cleaned_up",
+                    mapOf(
+                        "remaining_artifacts" to pendingArtifactPaths.size,
+                        "remaining_media" to pendingMediaUris.size
+                    )
+                )
+                activeTrace = null
                 sessionMutex.unlock()
             }
         }
@@ -75,6 +100,10 @@ class UiAutomationOrchestrator(
 
     private suspend fun runWithCleanup(goal: String, sessionId: String): ToolResult {
         if (goal.isBlank()) return failure("UI automation goal is blank.")
+        if (isDeviceLocked()) {
+            trace("session_blocked", mapOf("reason_code" to "device_locked"))
+            return failure("UI automation requires the device to be awake and unlocked.")
+        }
         onProgress("Observe", "Capturing the active window and accessibility tree")
         delay(INITIAL_OBSERVATION_DELAY_MS)
         var observation = observe() ?: return failure("Unable to observe the current UI through the Accessibility Service.")
@@ -98,7 +127,10 @@ class UiAutomationOrchestrator(
             var retries = 0
             while (parsedPlan.isFailure && retries < budget.maxPlannerRetriesPerObservation) {
                 val errorMsg = parsedPlan.exceptionOrNull()?.message
-                logger("UiAutomation planner parse failed: $errorMsg; output=${rawPlan.take(500)}")
+                logger(
+                    "UiAutomation planner parse failed: $errorMsg; " +
+                        "outputLength=${rawPlan.length} outputHash=${hashContent(rawPlan)}"
+                )
                 onProgress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
                 rawPlan = plan(goal, observation, actionHistory, goalAppCandidates, jsonRetry = true)
                     ?: return@withTimeoutOrNull failure("The UI planner returned no usable JSON after retry.")
@@ -106,12 +138,31 @@ class UiAutomationOrchestrator(
                 retries++
             }
             
-            val actionPlan = parsedPlan.getOrElse { error ->
-                logger("UiAutomation planner retry parse failed: ${error.message}; output=${rawPlan.take(500)}")
+            val planHorizon = parsedPlan.getOrElse { error ->
+                logger(
+                    "UiAutomation planner retry parse failed: ${error.message}; " +
+                        "outputLength=${rawPlan.length} outputHash=${hashContent(rawPlan)}"
+                )
+                trace(
+                    "plan_parse_failed",
+                    mapOf("error_type" to error::class.java.simpleName, "error_message" to error.message)
+                )
                 return@withTimeoutOrNull failure("The UI planner returned invalid action JSON after retry: ${error.message}")
             }
+            val actionPlan = planHorizon.firstExecutionSlice()
+            trace(
+                "plan_parsed",
+                mapOf(
+                    "screen_id" to observation.screen.screenId,
+                    "package" to observation.screen.packageName,
+                    "action_count" to planHorizon.executableSteps.size,
+                    "assertion_count" to planHorizon.steps.count { it is UiActionStep.Assert },
+                    "selected_action" to actionLabel(actionPlan.executableSteps.single()),
+                    "deferred_actions" to planHorizon.executableSteps.drop(1).map(::actionLabel)
+                )
+            )
             
-            val action = actionPlan.steps.first { it !is UiActionStep.Assert }
+            val action = actionPlan.executableSteps.single()
             val remainingAppCandidates = AutomationAppScope.remainingCandidates(
                 goal = goal,
                 candidates = goalAppCandidates,
@@ -232,6 +283,15 @@ class UiAutomationOrchestrator(
             }
 
             onProgress("Decision ${actionIndex + 1}", "Planner selected ${actionLabel(action)}")
+            trace(
+                "action_selected",
+                mapOf(
+                    "index" to actionIndex,
+                    "action" to actionLabel(action),
+                    "screen_id" to observation.screen.screenId,
+                    "package" to observation.screen.packageName
+                )
+            )
             when (action) {
                 is UiActionStep.Done -> return@withTimeoutOrNull success(action.summary)
                 is UiActionStep.AskUser -> return@withTimeoutOrNull success("User input required: ${action.reason}")
@@ -261,8 +321,21 @@ class UiAutomationOrchestrator(
                 else -> {
                     onProgress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
                     val result = execute(action, observation, sessionId, goal)
+                    trace(
+                        "action_executed",
+                        mapOf(
+                            "index" to actionIndex,
+                            "action" to actionLabel(action),
+                            "status" to if (result.isError) "failed" else "succeeded",
+                            "result_length" to result.output.length,
+                            "result_hash" to hashContent(result.output)
+                        )
+                    )
                     if (result.isError) {
-                        logger("UiAutomation execution failed action=${actionLabel(action)}: ${result.output}")
+                        logger(
+                            "UiAutomation execution failed action=${actionLabel(action)} " +
+                                "resultLength=${result.output.length} resultHash=${hashContent(result.output)}"
+                        )
                         actionHistory.add(
                             UiActionHistoryEntry(
                                 index = actionIndex,
@@ -288,15 +361,49 @@ class UiAutomationOrchestrator(
             val next = observeAfterAction(observation, action)
                 ?: return@withTimeoutOrNull failure("UI action ran, but the resulting screen could not be observed.")
             val assertion = actionPlan.steps.filterIsInstance<UiActionStep.Assert>().lastOrNull()?.condition
-            if (assertion != null && assertionMatches(assertion, next.screen)) {
-                return@withTimeoutOrNull success("Completed UI goal: $goal")
+            val assertionMatched = assertion?.let { assertionMatches(it, next.screen) }
+            val builtInPostcondition = UiActionPostconditionVerifier.verify(action, observation.screen, next.screen)
+            if (assertion != null) {
+                trace(
+                    "postcondition_checked",
+                    mapOf(
+                        "index" to actionIndex,
+                        "matched" to assertionMatched,
+                        "screen_id" to next.screen.screenId,
+                        "package" to next.screen.packageName
+                    )
+                )
+            }
+            if (builtInPostcondition.status != PostconditionStatus.NOT_APPLICABLE) {
+                trace(
+                    "built_in_postcondition_checked",
+                    mapOf(
+                        "index" to actionIndex,
+                        "status" to builtInPostcondition.status.name.lowercase(),
+                        "detail" to builtInPostcondition.detail,
+                        "screen_id" to next.screen.screenId,
+                        "package" to next.screen.packageName
+                    )
+                )
             }
 
             val changed = next.screen.screenId != observation.screen.screenId
             unchangedCount = if (changed) 0 else unchangedCount + 1
+            val postconditionFailed = assertionMatched == false ||
+                builtInPostcondition.status == PostconditionStatus.FAILED
+            val postconditionDetail = buildList {
+                when (assertionMatched) {
+                    true -> add("Planner postcondition matched; continue until an explicit done action.")
+                    false -> add("Planner postcondition did not match; replan from the observed state.")
+                    null -> Unit
+                }
+                if (builtInPostcondition.status != PostconditionStatus.NOT_APPLICABLE) {
+                    add(builtInPostcondition.detail)
+                }
+            }.takeIf { it.isNotEmpty() }?.joinToString(" ")
             
             if (action !is UiActionStep.Wait && action !is UiActionStep.Done && action !is UiActionStep.AskUser) {
-                successfulFingerprints.add(fingerprint)
+                if (!postconditionFailed) successfulFingerprints.add(fingerprint)
                 actionHistory.add(
                     UiActionHistoryEntry(
                         index = actionIndex,
@@ -305,9 +412,9 @@ class UiAutomationOrchestrator(
                         targetLabel = getTargetLabel(action, observation.screen),
                         sourceScreenId = observation.screen.screenId,
                         resultScreenId = next.screen.screenId,
-                        outcome = Outcome.SUCCEEDED,
+                        outcome = if (postconditionFailed) Outcome.FAILED else Outcome.SUCCEEDED,
                         changedScreen = changed,
-                        detail = null,
+                        detail = postconditionDetail,
                         sourcePackage = observation.screen.packageName,
                         resultPackage = next.screen.packageName
                     )
@@ -317,6 +424,18 @@ class UiAutomationOrchestrator(
             logger(
                 "UiAutomation step=${actionIndex + 1} action=${action::class.simpleName} " +
                     "screen=${observation.screen.screenId}->${next.screen.screenId} unchanged=$unchangedCount"
+            )
+            trace(
+                "transition_observed",
+                mapOf(
+                    "index" to actionIndex,
+                    "source_screen_id" to observation.screen.screenId,
+                    "result_screen_id" to next.screen.screenId,
+                    "source_package" to observation.screen.packageName,
+                    "result_package" to next.screen.packageName,
+                    "changed" to changed,
+                    "unchanged_count" to unchangedCount
+                )
             )
             if (unchangedCount >= budget.maxUnchangedObservations) {
                 return@withTimeoutOrNull failure("UI did not change after repeated actions; stopping automation.")
@@ -335,6 +454,14 @@ class UiAutomationOrchestrator(
         val result = AccessibilityToolHandler.execute(context, ToolCall("observe_ui", args))
         if (result == null || result.isError) {
             logger("UiAutomation observe_ui failed: ${result?.output}")
+            trace(
+                "observation_failed",
+                mapOf(
+                    "request_screenshot" to requestScreenshot,
+                    "result_length" to (result?.output?.length ?: 0),
+                    "result_hash" to result?.output?.let { hashContent(it) }
+                )
+            )
             return null
         }
         return runCatching {
@@ -359,9 +486,26 @@ class UiAutomationOrchestrator(
                 screen = UiTreeIndexer.parse(xmlResult.output, packageName, windowTitle),
                 screenshotPath = returnedScreenshotPath,
                 artifactPaths = artifactPaths
-            )
+            ).also { observation ->
+                trace(
+                    "observation_captured",
+                    mapOf(
+                        "observation_id" to observation.bridgeObservationId,
+                        "screen_id" to observation.screen.screenId,
+                        "package" to observation.screen.packageName,
+                        "window" to observation.screen.activityName,
+                        "element_count" to observation.screen.elements.size,
+                        "actionable_count" to observation.screen.plannerElements().size,
+                        "screenshot" to (observation.screenshotPath != null)
+                    )
+                )
+            }
         }.onFailure {
             logger("UiAutomation observation parse failed: ${it.message}")
+            trace(
+                "observation_parse_failed",
+                mapOf("error_type" to it::class.java.simpleName, "error_message" to it.message)
+            )
         }.getOrNull()
     }
 
@@ -474,7 +618,18 @@ class UiAutomationOrchestrator(
         return withTimeoutOrNull(PLANNER_TIMEOUT_MS) { completion.await() }?.also { raw ->
             logger(
                 "UiAutomation planner output screen=${observation.screen.screenId} " +
-                    "elements=${observation.screen.plannerElements(plannerElementLimit()).size}: ${raw.take(2_000)}"
+                    "elements=${observation.screen.plannerElements(plannerElementLimit()).size} " +
+                    "outputLength=${raw.length} outputHash=${hashContent(raw)}"
+            )
+            trace(
+                "planner_output_received",
+                mapOf(
+                    "screen_id" to observation.screen.screenId,
+                    "package" to observation.screen.packageName,
+                    "planner_output" to raw,
+                    "output_length" to raw.length,
+                    "json_retry" to jsonRetry
+                )
             )
         }
     }
@@ -733,6 +888,7 @@ class UiAutomationOrchestrator(
         goalAppCandidates: List<DeviceAction.AppCandidate>
     ): String {
         val elements = JsonArray()
+        val plannerIdByElementId = linkedMapOf<String, String>()
         val remainingAppCandidates = AutomationAppScope.remainingCandidates(
             goal = goal,
             candidates = goalAppCandidates,
@@ -740,6 +896,7 @@ class UiAutomationOrchestrator(
         )
         screen.plannerElements(plannerElementLimit())
             .forEachIndexed { index, element ->
+                plannerIdByElementId[element.id] = "p$index"
                 elements.add(JsonObject().apply {
                     addProperty("id", "p$index")
                     screen.plannerLabel(element)?.let { addProperty("label", it) }
@@ -817,6 +974,36 @@ class UiAutomationOrchestrator(
                         add(JsonObject().apply {
                             addProperty("label", app.label)
                             addProperty("package_name", app.packageName)
+                        })
+                    }
+                })
+            }
+            TelegramUiAdapter.inspect(screen)?.let { telegram ->
+                add("application_context", JsonObject().apply {
+                    addProperty("adapter", "telegram")
+                    addProperty("surface", telegram.surface.name.lowercase())
+                    if (telegram.targets.isNotEmpty()) {
+                        add("semantic_targets", JsonArray().apply {
+                            telegram.targets.forEach { target ->
+                                plannerIdByElementId[target.elementId]?.let { plannerId ->
+                                    add(JsonObject().apply {
+                                        addProperty("kind", target.kind)
+                                        addProperty("label", target.label)
+                                        addProperty("element_id", plannerId)
+                                        addProperty("confidence", "exact_unique")
+                                    })
+                                }
+                            }
+                        })
+                    }
+                    if (telegram.ambiguousKinds.isNotEmpty()) {
+                        add("ambiguous_targets", JsonArray().apply {
+                            telegram.ambiguousKinds.forEach { (kind, count) ->
+                                add(JsonObject().apply {
+                                    addProperty("kind", kind)
+                                    addProperty("count", count)
+                                })
+                            }
                         })
                     }
                 })
@@ -954,6 +1141,9 @@ class UiAutomationOrchestrator(
 
     private fun success(output: String) = ToolResult(CONTROL_UI_TOOL, output)
     private fun failure(output: String) = ToolResult(CONTROL_UI_TOOL, output, true)
+    private fun trace(name: String, fields: Map<String, Any?> = emptyMap()) {
+        activeTrace?.emit(name, fields)
+    }
 
     private fun actionLabel(action: UiActionStep): String = when (action) {
         is UiActionStep.Tap -> "tap"
@@ -998,12 +1188,14 @@ class UiAutomationOrchestrator(
               ]
             }
             Allowed action values: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera, share_captured_media.
+            The steps array may contain a short ordered horizon of at most 6 actions. Each action may be followed by one assert. Only the first action will execute before the UI is observed and replanned.
             Copy goal and screen_id exactly. Use only a supplied element id. open_app must copy package_name from launchable_apps. Never use Markdown.
         """.trimIndent()
 
         private val PLANNER_SYSTEM_PROMPT = """
-            Plan one safe Android UI action. Return one JSON object only, with no Markdown.
-            Required: exact supplied goal, exact screen_id, and steps containing exactly one action.
+            Plan the next safe Android UI action, optionally followed by a short future horizon. Return one JSON object only, with no Markdown.
+            Required: exact supplied goal, exact screen_id, and steps containing 1 to 6 actions. Each action may be followed by one assert.
+            Nabu executes only the first action against this screen, observes again, and replans. Future actions are intent only, so never assume they will execute without revalidation.
             Actions: tap, long_press, type_text, scroll, press_back, press_home, press_recents, open_notifications, open_quick_settings, wait, ask_user, done, open_app, open_settings_page, open_url, share_text, open_camera, share_captured_media.
             If the history of previous actions and the current screen indicate the goal is achieved, use the 'done' action.
             Targets use {"element_id":"p0"}; copy only an id supplied in elements.

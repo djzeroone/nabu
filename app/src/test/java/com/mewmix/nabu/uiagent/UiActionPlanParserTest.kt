@@ -106,7 +106,7 @@ class UiActionPlanParserTest {
     }
 
     @Test
-    fun `uses first action from a top level receding horizon array`() {
+    fun `preserves a top level receding horizon array`() {
         val plan = UiActionPlanParser.parsePlannerOutput(
             """
             [
@@ -119,19 +119,20 @@ class UiActionPlanParserTest {
             "screen1"
         )
 
-        assertEquals(
-            "com.google.android.youtube",
-            (plan.steps.single() as UiActionStep.OpenApp).packageName
-        )
+        assertEquals(3, plan.executableSteps.size)
+        assertEquals("com.google.android.youtube", (plan.executableSteps[0] as UiActionStep.OpenApp).packageName)
+        assertEquals(UiActionStep.Wait(30), plan.executableSteps[1])
+        assertEquals("com.oneplus.calculator", (plan.executableSteps[2] as UiActionStep.OpenApp).packageName)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `rejects multiple executable actions`() {
-        UiActionPlanParser.parsePlannerOutput(
+    @Test
+    fun `accepts multiple executable actions but slices only the first for execution`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
             """
             {
               "steps": [
                 {"action":"tap","target":{"element_id":"p0"}},
+                {"action":"assert","condition":{"text_contains":"Opened"}},
                 {"action":"open_app","package_name":"com.oneplus.calculator"}
               ]
             }
@@ -139,6 +140,44 @@ class UiActionPlanParserTest {
             "Open Calculator",
             "screen1"
         )
+
+        assertEquals(2, plan.executableSteps.size)
+        assertEquals(3, plan.steps.size)
+        val executionSlice = plan.firstExecutionSlice()
+        assertEquals(1, executionSlice.executableSteps.size)
+        assertEquals(2, executionSlice.steps.size)
+        assertTrue(executionSlice.steps[0] is UiActionStep.Tap)
+        assertTrue(executionSlice.steps[1] is UiActionStep.Assert)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `rejects an unbounded planner horizon`() {
+        val actions = (0..UiActionPlanParser.MAX_HORIZON_ACTIONS)
+            .joinToString(",") { "{\"action\":\"press_back\"}" }
+        UiActionPlanParser.parsePlannerOutput(
+            """{"steps":[$actions]}""",
+            "Go back",
+            "screen1"
+        )
+    }
+
+    @Test
+    fun `keeps a valid execution prefix when speculative future intent is malformed`() {
+        val plan = UiActionPlanParser.parsePlannerOutput(
+            """
+            {
+              "steps": [
+                {"action":"press_back"},
+                {"action":"tap","unknown_future_field":"discard me"},
+                {"action":"press_home"}
+              ]
+            }
+            """.trimIndent(),
+            "Navigate safely",
+            "screen1"
+        )
+
+        assertEquals(listOf(UiActionStep.PressBack), plan.steps)
     }
 
     @Test

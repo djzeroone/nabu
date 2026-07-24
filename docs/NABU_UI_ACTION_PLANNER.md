@@ -64,7 +64,11 @@ The planner returns JSON only:
 }
 ```
 
-Each model response contains exactly one non-assert action and at most one trailing assertion. Nabu observes again after every executed action.
+Each model response may contain a bounded horizon of one to six non-assert actions, with
+at most one assertion immediately after each action. Nabu validates and executes only the
+first action (plus its postcondition), observes again, and replans before any later action.
+Malformed future intent is discarded after a valid prefix; it is never batch-executed
+against stale UI state.
 
 Supported core actions:
 
@@ -126,7 +130,7 @@ Every call must include `observation_id` and a selector copied from the observat
 
 1. Nabu calls `observe_ui`.
 2. Nabu indexes XML and attaches the screenshot only when visual context is needed.
-3. The model emits one action and optional assertion.
+3. The model emits the next action and optional short future horizon.
 4. Nabu parses and validates the plan.
 5. Nabu blocks, asks for confirmation, asks the user, or calls one Glaive action.
 6. Nabu observes again and evaluates the assertion.
