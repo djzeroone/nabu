@@ -10,8 +10,10 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.tool
 import com.mewmix.nabu.utils.DebugLogger
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
@@ -195,6 +197,53 @@ class LiteRtLmBackend(
         if (!runtimeConfig.enableAudio) false else activeSupportsAudio.takeIf { initialized.get() }
             ?: LiteRtLmModelCompatibility.cachedResult(context, modelId, modelPath)?.supportsAudio
             ?: VisionModelSupport.supportsAudioInput(modelId)
+
+    override fun generateStructured(
+        conversation: List<LlmMessage>,
+        tools: List<LlmToolDefinition>
+    ): LlmStructuredResult? {
+        if (tools.isEmpty()) return null
+        val activeEngine = ensureEngine { _, _ -> } ?: return LlmStructuredResult()
+        val toolProviders = tools.map { definition ->
+            tool(object : OpenApiTool {
+                override fun getToolDescriptionJsonString(): String =
+                    """{"name":${definition.name.jsonQuoted()},"description":${definition.description.jsonQuoted()},"parameters":${definition.parametersJson}}"""
+
+                override fun execute(paramsJsonString: String): String =
+                    """{"accepted":true}"""
+            })
+        }
+        val prepared = prepareConversationInput(
+            conversation = conversation,
+            tools = toolProviders,
+            automaticToolCalling = false
+        ) ?: return LlmStructuredResult()
+
+        return try {
+            activeEngine.createConversation(prepared.config).use { liteConversation ->
+                activeConversation.set(liteConversation)
+                val response = liteConversation.sendMessage(prepared.prompt)
+                val call = response.toolCalls.firstOrNull()
+                if (call != null) {
+                    LlmStructuredResult(
+                        toolCall = LlmStructuredToolCall(
+                            name = call.name,
+                            arguments = call.arguments
+                        )
+                    )
+                } else {
+                    LlmStructuredResult(
+                        text = response.toString()
+                    )
+                }
+            }
+        } catch (t: Throwable) {
+            DebugLogger.logErr("LiteRtLmBackend structured generation error", t)
+            LlmStructuredResult()
+        } finally {
+            activeConversation.set(null)
+        }
+    }
 
     override fun sendMessage(
         conversation: List<LlmMessage>,
@@ -436,7 +485,11 @@ class LiteRtLmBackend(
         resultListener("", true)
     }
 
-    private fun prepareConversationInput(conversation: List<LlmMessage>): PreparedConversationInput? {
+    private fun prepareConversationInput(
+        conversation: List<LlmMessage>,
+        tools: List<ToolProvider> = emptyList(),
+        automaticToolCalling: Boolean = true
+    ): PreparedConversationInput? {
         val systemPrompt = conversation.firstOrNull { it.role == "system" }?.content?.trim().orEmpty()
         val nonSystemMessages = conversation.filterNot { it.role == "system" }
         val latestUserMessage = nonSystemMessages.lastOrNull { it.role == "user" }
@@ -452,7 +505,8 @@ class LiteRtLmBackend(
         val config = ConversationConfig(
             systemInstruction = systemPrompt.takeIf { it.isNotBlank() }?.let(Contents.Companion::of),
             initialMessages = initialMessages,
-            tools = emptyList<ToolProvider>(),
+            tools = tools,
+            automaticToolCalling = automaticToolCalling,
             samplerConfig = buildSamplerConfig()
         )
 
@@ -531,4 +585,7 @@ class LiteRtLmBackend(
             this[9] == 'A'.code.toByte() &&
             this[10] == 'V'.code.toByte() &&
             this[11] == 'E'.code.toByte()
+
+    private fun String.jsonQuoted(): String =
+        com.google.gson.JsonPrimitive(this).toString()
 }

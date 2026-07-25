@@ -39,6 +39,7 @@ sealed interface UiActionStep {
     data object OpenNotifications : UiActionStep
     data object OpenQuickSettings : UiActionStep
     data class Scroll(val direction: ScrollDirection, val target: UiTarget?) : UiActionStep
+    data class Focus(val target: UiTarget) : UiActionStep
     data class Wait(val milliseconds: Long) : UiActionStep
     data class Assert(val condition: UiAssertion) : UiActionStep
     data class AskUser(val reason: String) : UiActionStep
@@ -173,6 +174,8 @@ object UiActionPlanParser {
                 direction = ScrollDirection.valueOf(json.requiredString("direction").uppercase()),
                 target = parseTarget(json.optJsonObject("target"))
             ).also { checkKeys(json, "action", "direction", "target") }
+            "focus" -> UiActionStep.Focus(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
+                .also { checkKeys(json, "action", "target") }
             "wait" -> UiActionStep.Wait(json.optLong("ms") ?: error("Missing ms."))
                 .also { checkKeys(json, "action", "ms") }
             "assert" -> UiActionStep.Assert(parseAssertion(json.optJsonObject("condition")) ?: error("Missing or invalid condition."))
@@ -312,7 +315,7 @@ object UiActionPlanParser {
         else -> normalized
     }
 
-    private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll")
+    private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll", "focus")
     private val UI_TARGET_KEYS = setOf(
         "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label"
     )

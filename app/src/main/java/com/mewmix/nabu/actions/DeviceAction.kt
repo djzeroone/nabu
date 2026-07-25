@@ -186,6 +186,36 @@ object DeviceAction {
             .take(limit.coerceAtLeast(0))
     }.getOrDefault(emptyList())
 
+    /**
+     * Resolves an app only when its complete launcher label appears in the
+     * user's goal. This is a generic deterministic routing primitive, not an
+     * app allowlist. Longer exact labels win (for example "Telegram X" over
+     * "Telegram"); equally specific ambiguity is left to the planner/user.
+     */
+    fun findExplicitGoalAppCandidate(context: Context, goal: String): AppCandidate? =
+        explicitGoalAppCandidate(goal, listLaunchableApps(context))
+
+    internal fun explicitGoalAppCandidate(
+        goal: String,
+        candidates: List<AppCandidate>
+    ): AppCandidate? {
+        val paddedGoal = " ${normalizeAppName(goal)} "
+        val matches = candidates.mapNotNull { candidate ->
+            val label = normalizeAppName(candidate.label)
+            if (label.length >= 3 && paddedGoal.contains(" $label ")) {
+                label.length to candidate
+            } else {
+                null
+            }
+        }
+        val longest = matches.maxOfOrNull(Pair<Int, AppCandidate>::first) ?: return null
+        return matches
+            .filter { it.first == longest }
+            .map(Pair<Int, AppCandidate>::second)
+            .distinctBy(AppCandidate::packageName)
+            .singleOrNull()
+    }
+
     fun openUrl(context: Context, url: String): ActionResult {
         if (url.isBlank()) return ActionResult("Missing required parameter: url", true)
         val normalizedUrl = normalizeUrl(url)

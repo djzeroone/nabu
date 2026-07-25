@@ -14,6 +14,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import android.widget.Toast
@@ -38,6 +40,9 @@ class NabuAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastObservedPackage: String? = null
 
+    @Volatile
+    private var lastObservedFingerprint: String? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -54,9 +59,108 @@ class NabuAccessibilityService : AccessibilityService() {
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    private val serviceScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.SupervisorJob())
+    private var snapshotJob: kotlinx.coroutines.Job? = null
 
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null) return
+        if (event.eventType in SNAPSHOT_EVENT_TYPES) {
+            snapshotJob?.cancel()
+            snapshotJob = serviceScope.launch {
+                kotlinx.coroutines.delay(EVENT_DEBOUNCE_MS)
+                captureEventSnapshot()
+            }
+        }
+    }
 
+    /** Captures a snapshot and atomically leases it for one UI action. */
+    fun forceCaptureSnapshot(): UiSnapshot? {
+        snapshotJob?.cancel()
+        snapshotJob = null
+        return synchronized(observationLock) {
+            captureSnapshotLocked(bindForAction = true)
+        }
+    }
+
+    private fun captureEventSnapshot() {
+        synchronized(observationLock) {
+            captureSnapshotLocked(bindForAction = false)
+        }
+    }
+
+    private fun captureSnapshotLocked(bindForAction: Boolean): UiSnapshot? {
+        return try {
+            val window = targetWindow() ?: return null
+            val root = window.root ?: return null
+            val packageName = root.packageName?.toString().orEmpty()
+            val windowTitle = window.title?.toString().orEmpty()
+            val rotation = runCatching { display?.rotation ?: 0 }.getOrDefault(0)
+
+            val uiNodeRoot = buildUiNodeTree(root, "0")
+
+            val snapshot = UiSnapshotStore.updateSnapshot(UiSnapshot(
+                id = UUID.randomUUID().toString(),
+                capturedAtMs = System.currentTimeMillis(),
+                packageName = packageName,
+                windowTitle = windowTitle,
+                rotation = rotation,
+                displayBounds = Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels),
+                rootNode = uiNodeRoot
+            ))
+            if (bindForAction) {
+                lastObservationId = snapshot.id
+                lastObservedPackage = packageName
+                lastObservedFingerprint = snapshot.stateFingerprint
+            } else {
+                // Android often emits duplicate window/content events while a
+                // model is planning. Preserve the lease when the actual UI is
+                // identical; invalidate it only for a real state transition.
+                if (lastObservationId != null &&
+                    (lastObservedPackage != packageName ||
+                        lastObservedFingerprint != snapshot.stateFingerprint)
+                ) {
+                    clearActionLeaseLocked()
+                }
+            }
+            snapshot
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to capture in-memory snapshot", e)
+            null
+        }
+    }
+
+    private fun buildUiNodeTree(node: AccessibilityNodeInfo, path: String): UiNode {
+        val bounds = Rect().also(node::getBoundsInScreen)
+        val children = mutableListOf<UiNode>()
+        for (index in 0 until node.childCount) {
+            node.getChild(index)?.let { child ->
+                children.add(buildUiNodeTree(child, "$path/$index"))
+            }
+        }
+
+        return UiNode(
+            treePath = path,
+            packageName = node.packageName?.toString().orEmpty(),
+            resourceId = node.viewIdResourceName.orEmpty(),
+            className = node.className?.toString().orEmpty(),
+            text = if (node.isPassword) "•".repeat(node.text?.length ?: 8) else node.text?.toString().orEmpty(),
+            contentDescription = if (node.isPassword) "•".repeat(node.contentDescription?.length ?: 8) else node.contentDescription?.toString().orEmpty(),
+            isCheckable = node.isCheckable,
+            isChecked = node.isChecked,
+            isClickable = node.isClickable,
+            isEnabled = node.isEnabled,
+            isEditable = node.isEditable,
+            isFocusable = node.isFocusable,
+            isFocused = node.isFocused,
+            isVisibleToUser = node.isVisibleToUser,
+            isScrollable = node.isScrollable,
+            isLongClickable = node.isLongClickable,
+            isPassword = node.isPassword,
+            isSelected = node.isSelected,
+            boundsInScreen = bounds,
+            children = children
+        )
+    }
 
     override fun onInterrupt() {
         Log.d(TAG, "Service interrupted")
@@ -64,6 +168,8 @@ class NabuAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         if (instance == this) instance = null
+        serviceScope.cancel()
+        UiSnapshotStore.clear()
         super.onDestroy()
     }
 
@@ -126,6 +232,7 @@ class NabuAccessibilityService : AccessibilityService() {
         }
         lastObservationId = observationId
         lastObservedPackage = packageName
+        lastObservedFingerprint = null
         val result = JSONObject()
             .put("schema_version", 2)
             .put("observation_id", observationId)
@@ -155,6 +262,7 @@ class NabuAccessibilityService : AccessibilityService() {
         val root = window.root ?: throw IllegalStateException("The active application window has no accessibility root.")
         val currentPackage = root.packageName?.toString().orEmpty()
         require(currentPackage == lastObservedPackage) { "Active package changed since observation." }
+        clearActionLeaseLocked()
 
         val selector = params.optJSONObject("selector") ?: JSONObject()
         val target = findNode(root, selector)
@@ -196,11 +304,15 @@ class NabuAccessibilityService : AccessibilityService() {
                 val node = target ?: findScrollableAncestor(root)
                     ?: throw IllegalArgumentException("Scrollable target was not found.")
                 val scrollAction = when (direction) {
-                    "down", "right" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                    "up", "left" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    "down", "right" -> android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    "up", "left" -> android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
                     else -> throw IllegalArgumentException("Unsupported scroll direction '${direction}'.")
                 }
                 performNodeAction(node, scrollAction)
+            }
+            "ui_focus" -> {
+                val node = target ?: throw IllegalArgumentException("Target node was not found.")
+                performNodeAction(node, android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
             }
             "ui_global_action" -> when (params.optString("global_action").lowercase()) {
                 "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
@@ -213,7 +325,6 @@ class NabuAccessibilityService : AccessibilityService() {
             else -> throw IllegalArgumentException("Unknown UI action: ${action}")
         }
         if (!success) throw IllegalStateException("Accessibility action '${action}' failed.")
-        lastObservationId = null
         val result = JSONObject()
             .put("ok", true)
             .put("action", action)
@@ -223,6 +334,12 @@ class NabuAccessibilityService : AccessibilityService() {
             result.put("mechanism", params.getString("mechanism"))
         }
         result
+    }
+
+    private fun clearActionLeaseLocked() {
+        lastObservationId = null
+        lastObservedPackage = null
+        lastObservedFingerprint = null
     }
 
     private fun targetWindow(): AccessibilityWindowInfo? = windows.firstOrNull {
@@ -378,6 +495,17 @@ class NabuAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "NabuAccessibility"
+        private const val EVENT_DEBOUNCE_MS = 40L
+        private val SNAPSHOT_EVENT_TYPES = setOf(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_FOCUSED,
+            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        )
 
         private val _isConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
         val isConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _isConnected.asStateFlow()

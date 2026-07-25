@@ -20,7 +20,8 @@ class AccessibilityToolHandlerTest {
             "ui_long_press",
             "ui_set_text",
             "ui_scroll",
-            "ui_global_action"
+            "ui_global_action",
+            "ui_focus"
         ).forEach { toolName ->
             assertTrue("Expected native accessibility tool: $toolName", AccessibilityToolHandler.handles(toolName))
         }

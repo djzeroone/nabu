@@ -205,6 +205,7 @@ class ChatViewModel(
             "toggle_wifi",
             "toggle_bluetooth",
             "share_text",
+            "guide_ui",
             UiAutomationOrchestrator.CONTROL_UI_TOOL
         )
 
@@ -477,6 +478,11 @@ class ChatViewModel(
                     )
                 }
             }
+            explicitGuideUiGoal(normalized)?.let { goal ->
+                if ("guide_ui" in availableToolNames) {
+                    return ToolCall("guide_ui", mapOf("goal" to goal))
+                }
+            }
 
             if ("set_alarm" in availableToolNames) {
                 parseAlarmFallback(normalized)?.let { return it }
@@ -708,6 +714,13 @@ class ChatViewModel(
         internal fun explicitControlUiGoal(userMessage: String): String? {
             val match = Regex(
                 """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:control[\s_-]*ui|ui\s+automation)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.+?)\s*$"""
+            ).find(userMessage) ?: return null
+            return match.groupValues[1].trim().takeIf { it.isNotEmpty() }
+        }
+
+        internal fun explicitGuideUiGoal(userMessage: String): String? {
+            val match = Regex(
+                """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:guide[\s_-]*ui|guide\s+me|walk\s+me\s+through)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.+?)\s*$"""
             ).find(userMessage) ?: return null
             return match.groupValues[1].trim().takeIf { it.isNotEmpty() }
         }
@@ -2248,6 +2261,20 @@ class ChatViewModel(
             ) {
                 addTool(UiAutomationOrchestrator.CONTROL_UI_TOOL)
             }
+            if (containsAny(
+                    normalizedText,
+                    "guide me",
+                    "walk me through",
+                    "what should i tap",
+                    "where should i tap",
+                    "what do i press",
+                    "help me navigate",
+                    "show me how",
+                    "guide ui"
+                )
+            ) {
+                addTool("guide_ui")
+            }
             if (containsAny(normalizedText, "what can you do", "what tools", "available tools", "help me", "list tools")) addTool("list_tools")
             if (containsAny(normalizedText, "time", "clock", "hour")) addTool("get_current_time")
         }
@@ -2437,7 +2464,7 @@ class ChatViewModel(
             )
             _orchestration.value = _orchestration.value?.copy(isVisible = false)
             _isUiAutomationActive.value = true
-            delay(250L)
+            delay(50L)
             return try {
                 UiAutomationOrchestrator(
                     context = appContext,
@@ -2460,6 +2487,22 @@ class ChatViewModel(
                 }
                 _isUiAutomationActive.value = false
             }
+        }
+        if (effectiveToolCall.toolName == com.mewmix.nabu.uiagent.UiGuideRunner.TOOL_NAME) {
+            val goal = effectiveToolCall.arguments["goal"]?.toString()?.trim().orEmpty()
+            val plannerBackend = llmBackend ?: return ToolResult(
+                toolName = effectiveToolCall.toolName,
+                output = "No LLM backend is available for UI guidance.",
+                isError = true
+            )
+            return com.mewmix.nabu.uiagent.UiGuideRunner(
+                context = appContext,
+                backend = plannerBackend,
+                onProgress = { phase, detail ->
+                    recordOrchestration(phase, detail, com.mewmix.nabu.uiagent.UiGuideRunner.TOOL_NAME)
+                },
+                logger = DebugLogger::log
+            ).run(goal)
         }
         ActionTools.execute(appContext, effectiveToolCall)?.let { return it }
 

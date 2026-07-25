@@ -7,6 +7,43 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CrossAppAutomationTest {
+    @Test
+    fun `explicit installed app resolution is generic and prefers longest label`() {
+        val candidates = listOf(
+            DeviceAction.AppCandidate("Telegram", "org.telegram"),
+            DeviceAction.AppCandidate("Telegram X", "org.telegram.x"),
+            DeviceAction.AppCandidate("Settings", "com.android.settings")
+        )
+
+        assertEquals(
+            "org.telegram.x",
+            DeviceAction.explicitGoalAppCandidate(
+                "open Telegram X and search for High Council",
+                candidates
+            )?.packageName
+        )
+        assertEquals(
+            "com.android.settings",
+            DeviceAction.explicitGoalAppCandidate(
+                "use Settings to inspect accessibility",
+                candidates
+            )?.packageName
+        )
+    }
+
+    @Test
+    fun `explicit installed app resolution rejects equal ambiguity`() {
+        val candidates = listOf(
+            DeviceAction.AppCandidate("Transit", "one.transit"),
+            DeviceAction.AppCandidate("Transit", "two.transit")
+        )
+
+        assertEquals(
+            null,
+            DeviceAction.explicitGoalAppCandidate("open Transit", candidates)
+        )
+    }
+
     private val candidates = listOf(
         DeviceAction.AppCandidate("YouTube", "com.google.android.youtube"),
         DeviceAction.AppCandidate("Messages", "com.google.android.apps.messaging"),

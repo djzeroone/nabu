@@ -130,6 +130,17 @@ class ChatViewModelInferenceTest {
     }
 
     @Test
+    fun explicitGuideRequestRoutesOnlyToGuide() {
+        assertEquals(
+            ToolCall("guide_ui", mapOf("goal" to "turn on dark mode")),
+            ChatViewModel.inferToolCallFromModelFailure(
+                userMessage = "guide me to turn on dark mode",
+                availableToolNames = setOf("guide_ui", UiAutomationOrchestrator.CONTROL_UI_TOOL)
+            )
+        )
+    }
+
+    @Test
     fun planDirectActionChain_schedulesOtherSupportedActions() {
         val plan = ChatViewModel.planDirectActionChain(
             userMessage = "pause media then in 15 seconds play media",

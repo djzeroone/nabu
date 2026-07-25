@@ -10,6 +10,10 @@ fun UiActionStep.toJson(): JsonObject {
             obj.addProperty("action", "tap")
             obj.add("target", this.target.toJson())
         }
+        is UiActionStep.Focus -> {
+            obj.addProperty("action", "focus")
+            obj.add("target", this.target.toJson())
+        }
         is UiActionStep.LongPress -> {
             obj.addProperty("action", "long_press")
             obj.add("target", this.target.toJson())

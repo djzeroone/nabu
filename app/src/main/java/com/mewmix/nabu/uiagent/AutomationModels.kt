@@ -32,8 +32,8 @@ data class AutomationBudget(
     val maxCumulativeWaitMs: Long = 20_000,
     val maxUiTransitionWaitMs: Long = 5_000,
     val maxInAppTransitionWaitMs: Long = 1_500,
-    val transitionPollIntervalMs: Long = 200,
-    val postActionSettleDelayMs: Long = 150
+    val transitionPollIntervalMs: Long = 50,
+    val postActionSettleDelayMs: Long = 40
 )
 
 internal object AutomationAppScope {
@@ -106,6 +106,7 @@ internal object UiTransitionPolicy {
         UiActionStep.OpenNotifications,
         UiActionStep.OpenQuickSettings -> budget.maxUiTransitionWaitMs
         is UiActionStep.Tap,
+        is UiActionStep.Focus,
         is UiActionStep.LongPress,
         is UiActionStep.TypeText,
         is UiActionStep.Scroll -> budget.maxInAppTransitionWaitMs

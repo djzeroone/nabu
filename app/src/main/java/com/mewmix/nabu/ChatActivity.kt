@@ -50,7 +50,6 @@ import com.mewmix.nabu.ui.brutalist.PanelBox
 import com.mewmix.nabu.viewmodel.ChatViewModel
 import com.mewmix.nabu.chat.LlmRuntimeOverrides
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -219,12 +218,15 @@ class ChatActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             viewModel.isUiAutomationActive.collect { active ->
-                if (!active && parkedForUiAutomation) {
-                    delay(1_000L)
-                    if (!viewModel.isUiAutomationActive.value && parkedForUiAutomation) {
-                        parkedForUiAutomation = false
-                        finish()
-                    }
+                if (active && !parkedForUiAutomation) {
+                    parkedForUiAutomation = true
+                    moveTaskToBack(true)
+                } else if (!active && parkedForUiAutomation) {
+                    // Keep the chat task alive in the background so the user
+                    // can return to the verified result and action history.
+                    // Finishing here made successful Control runs look like
+                    // application crashes and discarded the active surface.
+                    parkedForUiAutomation = false
                 }
             }
         }

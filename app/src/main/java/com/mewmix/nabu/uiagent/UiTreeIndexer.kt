@@ -6,8 +6,74 @@ import java.security.MessageDigest
 import javax.xml.parsers.DocumentBuilderFactory
 import org.xml.sax.InputSource
 
+import com.mewmix.nabu.accessibility.UiSnapshot
+import com.mewmix.nabu.accessibility.UiNode
+
 object UiTreeIndexer {
     private val boundsPattern = Regex("""\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]""")
+
+    fun build(snapshot: UiSnapshot): UiScreenState {
+        val indexed = mutableListOf<UiElement>()
+
+        fun visit(node: UiNode, parentId: String?) {
+            val bounds = UiBounds(
+                node.boundsInScreen.left,
+                node.boundsInScreen.top,
+                node.boundsInScreen.right,
+                node.boundsInScreen.bottom
+            )
+            val id = stableElementId(
+                node.packageName,
+                node.resourceId.takeIf { it.isNotBlank() },
+                node.text.takeIf { it.isNotBlank() },
+                node.contentDescription.takeIf { it.isNotBlank() },
+                node.className.takeIf { it.isNotBlank() },
+                bounds,
+                node.treePath
+            )
+            indexed += UiElement(
+                id = id,
+                text = node.text.takeIf { it.isNotBlank() },
+                contentDescription = node.contentDescription.takeIf { it.isNotBlank() },
+                resourceId = node.resourceId.takeIf { it.isNotBlank() },
+                className = node.className.takeIf { it.isNotBlank() },
+                packageName = node.packageName.takeIf { it.isNotBlank() },
+                bounds = bounds,
+                clickable = node.isClickable,
+                enabled = node.isEnabled,
+                visible = node.isVisibleToUser,
+                editable = node.isEditable || node.className == "android.widget.EditText",
+                scrollable = node.isScrollable,
+                longClickable = node.isLongClickable,
+                checkable = node.isCheckable,
+                checked = node.isChecked,
+                password = node.isPassword,
+                parentId = parentId,
+                treePath = node.treePath,
+                hintText = null,
+                focusable = node.isFocusable,
+                focused = node.isFocused,
+                selected = node.isSelected
+            )
+            for (child in node.children) {
+                visit(child, id)
+            }
+        }
+
+        snapshot.rootNode?.let { visit(it, null) }
+
+        val resolvedPackage = snapshot.packageName
+        val screenId = stableHash(
+            listOf(
+                resolvedPackage,
+                "", // activityName
+                indexed.joinToString("|") {
+                    "${it.id}:${it.enabled}:${it.visible}:${it.checked}:${it.text.orEmpty()}"
+                }
+            ).joinToString("\u001f")
+        )
+        return UiScreenState(screenId, resolvedPackage, null, indexed)
+    }
 
     fun parse(
         xml: String,

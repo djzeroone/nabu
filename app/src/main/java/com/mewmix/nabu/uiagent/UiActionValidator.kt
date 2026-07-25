@@ -41,6 +41,8 @@ object UiActionValidator {
     private fun validateStep(step: UiActionStep, screen: UiScreenState): UiPlanDecision? = when (step) {
         is UiActionStep.Tap -> validateTarget(step.target, screen, requireEnabled = true)?.let { it }
             ?: validateCapability(step.target, screen, "clickable") { it.clickable || it.checkable }
+        is UiActionStep.Focus -> validateTarget(step.target, screen, requireEnabled = true)?.let { it }
+            ?: validateCapability(step.target, screen, "focusable") { it.focusable || it.clickable || it.checkable }
         is UiActionStep.LongPress -> validateTarget(step.target, screen, requireEnabled = true)?.let { it }
             ?: validateCapability(step.target, screen, "long-clickable") { it.longClickable }
         is UiActionStep.TypeText -> {

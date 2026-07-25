@@ -17,7 +17,8 @@ object AccessibilityToolHandler {
         "ui_long_press",
         "ui_set_text",
         "ui_scroll",
-        "ui_global_action"
+        "ui_global_action",
+        "ui_focus"
     )
 
     fun isEnabled(): Boolean {
@@ -27,8 +28,13 @@ object AccessibilityToolHandler {
     val TOOLS = listOf(
         com.mewmix.nabu.tools.Tool(
             name = "read_screen",
-            description = "Reads the visible UI structure (Accessibility node tree) of the device screen. Use this ONLY for inspecting the Android UI, NOT for reading files from storage.",
+            description = "Instantly describe the current Android screen, including visible text, focus, controls, and control states. This is read-only.",
             parameters = emptyMap()
+        ),
+        com.mewmix.nabu.tools.Tool(
+            name = "guide_ui",
+            description = "Tell the user the next step and move accessibility focus to that control without clicking, typing, or otherwise operating it.",
+            parameters = mapOf("goal" to "The user's goal")
         ),
         com.mewmix.nabu.tools.Tool(
             name = "take_screenshot",
@@ -61,14 +67,9 @@ object AccessibilityToolHandler {
                 }
             }
             "read_screen" -> {
-                val id = UUID.randomUUID().toString()
-                val xmlPath = File(context.cacheDir, "nabu_ui_$id.xml").absolutePath
-                if (service.dumpScreenToXml(xmlPath)) {
-                    val result = JSONObject().put("path", xmlPath)
-                    ToolResult(call.toolName, result.toString(), false)
-                } else {
-                    ToolResult(call.toolName, "Failed to capture screen XML.", true)
-                }
+                val snapshot = service.forceCaptureSnapshot()
+                    ?: return ToolResult(call.toolName, "Failed to capture the current screen.", true)
+                ToolResult(call.toolName, ScreenSemanticDescriber.describe(snapshot), false)
             }
             "take_screenshot" -> {
                 if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
@@ -92,7 +93,7 @@ object AccessibilityToolHandler {
                     ToolResult(call.toolName, "XML file not found at $path.", true)
                 }
             }
-            "ui_tap", "ui_long_press", "ui_set_text", "ui_scroll", "ui_global_action" -> {
+            "ui_tap", "ui_long_press", "ui_set_text", "ui_scroll", "ui_global_action", "ui_focus" -> {
                 try {
                     val params = JSONObject(call.arguments)
                     val result = service.performUiAction(call.toolName, params)

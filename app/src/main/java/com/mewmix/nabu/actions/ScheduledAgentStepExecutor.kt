@@ -223,36 +223,7 @@ object ScheduledAgentStepExecutor {
             if (xmlResult == null || xmlResult.isError) {
                 return xmlResult ?: ToolResult(call.toolName, "Failed to read screen", true)
             }
-            var file: java.io.File? = null
-            var content: String? = null
-            var error: String? = null
-            try {
-                val path = org.json.JSONObject(xmlResult.output).getString("path")
-                file = java.io.File(path)
-                if (!file.exists()) {
-                    error = "XML file missing."
-                } else {
-                    content = file.readText()
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                error = "Error reading screen XML: ${e.message}"
-            } finally {
-                var deleted = true
-                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                    deleted = file?.takeIf { it.exists() }?.delete() ?: true
-                }
-                if (!deleted && error == null) {
-                    error = "Failed to delete XML cache file."
-                }
-            }
-
-            return if (error != null) {
-                ToolResult(call.toolName, error, true)
-            } else {
-                ToolResult(call.toolName, content!!, false)
-            }
+            return xmlResult
         }
         
         return ActionTools.execute(context, call) ?: ToolResult(
