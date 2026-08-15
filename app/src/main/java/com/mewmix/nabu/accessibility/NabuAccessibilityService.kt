@@ -43,17 +43,19 @@ class NabuAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastObservedFingerprint: String? = null
 
+    private var actionOverlay: ActionSessionOverlay? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         Log.d(TAG, "Service connected")
+        actionOverlay = ActionSessionOverlay(this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             accessibilityButtonController.registerAccessibilityButtonCallback(object : android.accessibilityservice.AccessibilityButtonController.AccessibilityButtonCallback() {
                 override fun onClicked(controller: android.accessibilityservice.AccessibilityButtonController) {
                     super.onClicked(controller)
-                    val intent = com.mewmix.nabu.ChatActivity.createGlobalTriggerIntent(this@NabuAccessibilityService)
-                    startActivity(intent)
+                    actionOverlay?.show()
                 }
             })
         }
@@ -90,10 +92,10 @@ class NabuAccessibilityService : AccessibilityService() {
 
     private fun captureSnapshotLocked(bindForAction: Boolean): UiSnapshot? {
         return try {
-            val window = targetWindow() ?: return null
-            val root = window.root ?: return null
+            val window = targetWindow()
+            val root = window?.root ?: rootInActiveWindow ?: return null
             val packageName = root.packageName?.toString().orEmpty()
-            val windowTitle = window.title?.toString().orEmpty()
+            val windowTitle = window?.title?.toString().orEmpty()
             val rotation = runCatching { display?.rotation ?: 0 }.getOrDefault(0)
 
             val uiNodeRoot = buildUiNodeTree(root, "0")
@@ -112,13 +114,7 @@ class NabuAccessibilityService : AccessibilityService() {
                 lastObservedPackage = packageName
                 lastObservedFingerprint = snapshot.stateFingerprint
             } else {
-                // Android often emits duplicate window/content events while a
-                // model is planning. Preserve the lease when the actual UI is
-                // identical; invalidate it only for a real state transition.
-                if (lastObservationId != null &&
-                    (lastObservedPackage != packageName ||
-                        lastObservedFingerprint != snapshot.stateFingerprint)
-                ) {
+                if (lastObservationId != null && lastObservedPackage != null && lastObservedPackage != packageName) {
                     clearActionLeaseLocked()
                 }
             }
@@ -167,6 +163,8 @@ class NabuAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        actionOverlay?.hide()
+        actionOverlay = null
         if (instance == this) instance = null
         serviceScope.cancel()
         UiSnapshotStore.clear()
@@ -216,8 +214,8 @@ class NabuAccessibilityService : AccessibilityService() {
     }
 
     fun observeUi(xmlPath: String, screenshotPath: String?): JSONObject = synchronized(observationLock) {
-        val window = targetWindow() ?: throw IllegalStateException("No active application window is available.")
-        val root = window.root ?: throw IllegalStateException("The active application window has no accessibility root.")
+        val window = targetWindow()
+        val root = window?.root ?: rootInActiveWindow ?: throw IllegalStateException("No active application window is available.")
         val observationId = UUID.randomUUID().toString()
         val packageName = root.packageName?.toString().orEmpty()
         val capturedAt = System.currentTimeMillis()
@@ -238,7 +236,7 @@ class NabuAccessibilityService : AccessibilityService() {
             .put("observation_id", observationId)
             .put("captured_at_ms", capturedAt)
             .put("package", packageName)
-            .put("window_title", window.title?.toString().orEmpty())
+            .put("window_title", window?.title?.toString().orEmpty())
             .put("rotation", runCatching { display?.rotation ?: 0 }.getOrDefault(0))
             .put("display_bounds", JSONArray(listOf(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)))
             .put("xml_path", xmlPath)
@@ -249,19 +247,20 @@ class NabuAccessibilityService : AccessibilityService() {
     }
 
     fun dumpScreenToXml(destPath: String): Boolean {
-        val window = targetWindow() ?: return false
-        val root = window.root ?: return false
+        val window = targetWindow()
+        val root = window?.root ?: rootInActiveWindow ?: return false
         return writeHierarchy(root, window, UUID.randomUUID().toString(), destPath)
     }
 
     fun performUiAction(action: String, params: JSONObject): JSONObject = synchronized(observationLock) {
         val observationId = params.optString("observation_id").trim()
         require(observationId.isNotEmpty()) { "observation_id is required." }
-        require(observationId == lastObservationId) { "Stale or unknown observation_id." }
-        val window = targetWindow() ?: throw IllegalStateException("No active application window is available.")
-        val root = window.root ?: throw IllegalStateException("The active application window has no accessibility root.")
+        val window = targetWindow()
+        val root = window?.root ?: rootInActiveWindow ?: throw IllegalStateException("No active application window is available.")
         val currentPackage = root.packageName?.toString().orEmpty()
-        require(currentPackage == lastObservedPackage) { "Active package changed since observation." }
+        if (lastObservedPackage != null && currentPackage != lastObservedPackage) {
+            throw IllegalStateException("Active package changed since observation ($lastObservedPackage -> $currentPackage).")
+        }
         clearActionLeaseLocked()
 
         val selector = params.optJSONObject("selector") ?: JSONObject()
@@ -297,18 +296,37 @@ class NabuAccessibilityService : AccessibilityService() {
                 val arguments = Bundle().apply {
                     putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
                 }
-                node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                var textSuccess = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                if (!textSuccess) {
+                    val editableTarget = findEditableNode(node)
+                    if (editableTarget != null && editableTarget != node) {
+                        textSuccess = editableTarget.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                    }
+                }
+                if (!textSuccess) {
+                    performNodeAction(node, AccessibilityNodeInfo.ACTION_CLICK)
+                    textSuccess = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                }
+                if (!textSuccess) {
+                    runCatching { dispatchPointGesture(params, longPress = false) }
+                    textSuccess = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                }
+                textSuccess
             }
             "ui_scroll" -> {
                 val direction = params.optString("direction").lowercase()
-                val node = target ?: findScrollableAncestor(root)
-                    ?: throw IllegalArgumentException("Scrollable target was not found.")
                 val scrollAction = when (direction) {
                     "down", "right" -> android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
                     "up", "left" -> android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
                     else -> throw IllegalArgumentException("Unsupported scroll direction '${direction}'.")
                 }
-                performNodeAction(node, scrollAction)
+                val node = target ?: findScrollableAncestor(root)
+                val nodeSuccess = node?.let { runCatching { performNodeAction(it, scrollAction) }.getOrDefault(false) } ?: false
+                if (nodeSuccess) {
+                    true
+                } else {
+                    dispatchScrollGesture(direction, params)
+                }
             }
             "ui_focus" -> {
                 val node = target ?: throw IllegalArgumentException("Target node was not found.")
@@ -342,14 +360,20 @@ class NabuAccessibilityService : AccessibilityService() {
         lastObservedFingerprint = null
     }
 
-    private fun targetWindow(): AccessibilityWindowInfo? = windows.firstOrNull {
-        it.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
-            it.root?.packageName?.toString() != packageName
-    } ?: windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+    private fun targetWindow(): AccessibilityWindowInfo? {
+        val appWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+        return appWindows.firstOrNull { it.isFocused && it.root?.packageName?.toString() != packageName }
+            ?: appWindows.firstOrNull { it.isActive && it.root?.packageName?.toString() != packageName }
+            ?: appWindows.filter { it.root?.packageName?.toString() != packageName }.maxByOrNull { it.layer }
+            ?: appWindows.firstOrNull { it.isFocused }
+            ?: appWindows.firstOrNull { it.isActive }
+            ?: appWindows.maxByOrNull { it.layer }
+            ?: windows.firstOrNull()
+    }
 
     private fun writeHierarchy(
         root: AccessibilityNodeInfo,
-        window: AccessibilityWindowInfo,
+        window: AccessibilityWindowInfo?,
         observationId: String,
         destPath: String
     ): Boolean = try {
@@ -359,7 +383,7 @@ class NabuAccessibilityService : AccessibilityService() {
             setAttribute("schema-version", "2")
             setAttribute("observation-id", observationId)
             setAttribute("package", root.packageName?.toString().orEmpty())
-            setAttribute("window-title", window.title?.toString().orEmpty())
+            setAttribute("window-title", window?.title?.toString().orEmpty())
             val rotation = runCatching { display?.rotation ?: 0 }.getOrDefault(0)
             setAttribute("rotation", rotation.toString())
         }
@@ -464,6 +488,16 @@ class NabuAccessibilityService : AccessibilityService() {
         return null
     }
 
+    private fun findEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (root.isEditable) return root
+        for (index in 0 until root.childCount) {
+            root.getChild(index)?.let { child ->
+                findEditableNode(child)?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun dispatchPointGesture(params: JSONObject, longPress: Boolean): Boolean {
         val bounds = params.optJSONArray("fallback_bounds")
             ?: throw IllegalArgumentException("Target node and fallback_bounds are unavailable.")
@@ -479,6 +513,60 @@ class NabuAccessibilityService : AccessibilityService() {
         val path = Path().apply { moveTo((left + right) / 2f, (top + bottom) / 2f) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, if (longPress) 650 else 80))
+            .build()
+        val deferred = CompletableDeferred<Boolean>()
+        dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription) {
+                deferred.complete(true)
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription) {
+                deferred.complete(false)
+            }
+        }, null)
+        return kotlinx.coroutines.runBlocking { deferred.await() }
+    }
+
+    private fun dispatchScrollGesture(direction: String, params: JSONObject): Boolean {
+        val displayMetrics = resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels.toFloat()
+        val screenHeight = displayMetrics.heightPixels.toFloat()
+
+        val bounds = params.optJSONArray("fallback_bounds")
+        val (startX, startY, endX, endY) = if (bounds != null && bounds.length() == 4) {
+            val left = bounds.getInt(0).toFloat()
+            val top = bounds.getInt(1).toFloat()
+            val right = bounds.getInt(2).toFloat()
+            val bottom = bounds.getInt(3).toFloat()
+            val centerX = (left + right) / 2f
+            val centerY = (top + bottom) / 2f
+            val deltaY = ((bottom - top) * 0.4f).coerceAtLeast(200f)
+            val deltaX = ((right - left) * 0.4f).coerceAtLeast(200f)
+            when (direction) {
+                "down" -> listOf(centerX, (centerY + deltaY / 2f).coerceAtMost(screenHeight - 50f), centerX, (centerY - deltaY / 2f).coerceAtLeast(50f))
+                "up" -> listOf(centerX, (centerY - deltaY / 2f).coerceAtLeast(50f), centerX, (centerY + deltaY / 2f).coerceAtMost(screenHeight - 50f))
+                "right" -> listOf((centerX + deltaX / 2f).coerceAtMost(screenWidth - 50f), centerY, (centerX - deltaX / 2f).coerceAtLeast(50f), centerY)
+                "left" -> listOf((centerX - deltaX / 2f).coerceAtLeast(50f), centerY, (centerX + deltaX / 2f).coerceAtMost(screenWidth - 50f), centerY)
+                else -> listOf(centerX, (centerY + 200f).coerceAtMost(screenHeight - 50f), centerX, (centerY - 200f).coerceAtLeast(50f))
+            }
+        } else {
+            val centerX = screenWidth / 2f
+            val centerY = screenHeight / 2f
+            when (direction) {
+                "down" -> listOf(centerX, screenHeight * 0.75f, centerX, screenHeight * 0.25f)
+                "up" -> listOf(centerX, screenHeight * 0.25f, centerX, screenHeight * 0.75f)
+                "right" -> listOf(screenWidth * 0.8f, centerY, screenWidth * 0.2f, centerY)
+                "left" -> listOf(screenWidth * 0.2f, centerY, screenWidth * 0.8f, centerY)
+                else -> listOf(centerX, screenHeight * 0.75f, centerX, screenHeight * 0.25f)
+            }
+        }
+
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
             .build()
         val deferred = CompletableDeferred<Boolean>()
         dispatchGesture(gesture, object : GestureResultCallback() {

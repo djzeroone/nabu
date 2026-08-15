@@ -1,6 +1,8 @@
 package com.mewmix.nabu.accessibility
 
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
+import android.view.accessibility.AccessibilityManager
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolResult
 import org.json.JSONObject
@@ -23,6 +25,39 @@ object AccessibilityToolHandler {
 
     fun isEnabled(): Boolean {
         return NabuAccessibilityService.instance != null
+    }
+
+    /**
+     * Verifies the control plane while Nabu is still visible.
+     *
+     * Callers must run this before parking Chat or opening another task. A successful probe proves
+     * both that Android has bound the service and that it can lease a real accessibility snapshot.
+     */
+    fun controlPlaneFailure(context: Context): String? {
+        val service = NabuAccessibilityService.instance
+        if (service == null) {
+            val manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+            val enabledByAndroid = manager
+                ?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                ?.any { info ->
+                    info.resolveInfo.serviceInfo.packageName == context.packageName &&
+                        info.resolveInfo.serviceInfo.name == NabuAccessibilityService::class.java.name
+                } == true
+            return if (enabledByAndroid) {
+                "Nabu Accessibility Service is enabled but has not connected yet. " +
+                    "Keep Nabu open for a moment or toggle the service off and on, then invoke device control again. " +
+                    "The current screen was not changed."
+            } else {
+                "Nabu Accessibility Service is disabled. Enable Nabu in Android Settings > " +
+                    "Accessibility, then invoke device control again. The current screen was not changed."
+            }
+        }
+        if (service.forceCaptureSnapshot() == null) {
+            return "Nabu Accessibility Service is connected, but Android did not expose a readable active window. " +
+                "Keep the device awake and unlocked, then invoke device control again. " +
+                "The current screen was not changed."
+        }
+        return null
     }
 
     val TOOLS = listOf(

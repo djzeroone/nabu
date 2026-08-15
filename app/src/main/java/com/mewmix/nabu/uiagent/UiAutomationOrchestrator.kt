@@ -35,6 +35,8 @@ class UiAutomationOrchestrator(
     private val isScheduled: Boolean = false,
     private val onProgress: (phase: String, detail: String) -> Unit = { _, _ -> },
     private val onModelOutput: (String) -> Unit = {},
+    private val onUserQuestion: suspend (String) -> Unit = {},
+    private val onUserQuestionCleared: suspend () -> Unit = {},
     private val logger: (String) -> Unit = {}
 ) {
     private data class Observation(
@@ -57,6 +59,7 @@ class UiAutomationOrchestrator(
     private var pendingCapture: PendingCapture? = null
     private var pendingExternalEffect: PendingExternalEffect? = null
     private var activeTrace: AutomationTraceRecorder? = null
+    private var activeSessionId: String? = null
 
     suspend fun run(goal: String): ToolResult {
         val sessionId = UUID.randomUUID().toString()
@@ -69,9 +72,40 @@ class UiAutomationOrchestrator(
             trace.emit("session_dequeued")
         }
         activeTrace = trace
+        activeSessionId = sessionId
+        var terminalResult: ToolResult? = null
         return try {
+            if (goal.isBlank()) {
+                trace.emit("session_preflight_failed", mapOf("reason_code" to "blank_goal"))
+                return failure("UI automation goal is blank.").also { terminalResult = it }
+            }
+            if (isDeviceLocked()) {
+                trace.emit("session_preflight_failed", mapOf("reason_code" to "device_locked"))
+                return failure("UI automation requires the device to be awake and unlocked.").also {
+                    terminalResult = it
+                }
+            }
+            AccessibilityToolHandler.controlPlaneFailure(context)?.let { detail ->
+                logger("UiAutomation preflight failed before takeover: $detail")
+                trace.emit(
+                    "session_preflight_failed",
+                    mapOf("reason_code" to "accessibility_control_plane_unavailable")
+                )
+                return failure(detail).also { terminalResult = it }
+            }
+
+            AutomationSessionManager.begin(context, sessionId, goal)
             trace.emit("session_started")
+            if (!isScheduled && ControlSurfaceCoordinator.isChatForegrounded) {
+                progress("Take over", "Parking Chat after acquiring the device-control channel")
+                val acknowledged = ControlSurfaceCoordinator.parkAndAwait(sessionId, timeoutMs = 800L)
+                trace.emit(
+                    "control_surface_parked",
+                    mapOf("acknowledged" to acknowledged)
+                )
+            }
             runWithCleanup(goal, sessionId).also { result ->
+                terminalResult = result
                 trace.emit(
                     "session_finished",
                     mapOf(
@@ -94,24 +128,39 @@ class UiAutomationOrchestrator(
                     )
                 )
                 activeTrace = null
+                activeSessionId = null
+                ControlSurfaceCoordinator.clear(sessionId)
+                AutomationSessionManager.finish(
+                    sessionId = sessionId,
+                    succeeded = terminalResult?.isError == false,
+                    detail = terminalResult?.output ?: "Device-control runner was cancelled."
+                )
                 sessionMutex.unlock()
             }
         }
     }
 
-    private suspend fun runWithCleanup(goal: String, sessionId: String): ToolResult {
+    private suspend fun runWithCleanup(initialGoal: String, sessionId: String): ToolResult {
+        var goal = initialGoal
         if (goal.isBlank()) return failure("UI automation goal is blank.")
+        when (val directive = AutomationSessionManager.awaitDirective(sessionId)) {
+            AutomationSessionDirective.Cancel ->
+                return failure("Device control was stopped by the user.")
+            is AutomationSessionDirective.Run -> goal = directive.goal
+        }
         if (isDeviceLocked()) {
             trace("session_blocked", mapOf("reason_code" to "device_locked"))
             return failure("UI automation requires the device to be awake and unlocked.")
         }
-        onProgress("Observe", "Capturing the active window and accessibility tree")
-        delay(INITIAL_OBSERVATION_DELAY_MS)
+        progress("Observe", "Capturing the active window and accessibility tree")
         var observation = observeInitial()
-            ?: return failure("Unable to observe the current UI after Android finished switching windows.")
+            ?: return failure(
+                "Nabu lost its accessibility control plane while Android was switching windows. " +
+                    "Return to Nabu and invoke device control again."
+            )
 
         deterministicNavigationAction(goal)?.let { action ->
-            onProgress("Execute", "Running ${actionLabel(action)} without model inference")
+            progress("Execute", "Running ${actionLabel(action)} without model inference")
             val actionPlan = UiActionPlan(goal, observation.screen.screenId, listOf(action))
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
@@ -138,18 +187,18 @@ class UiAutomationOrchestrator(
             return success("${actionLabel(action).replaceFirstChar(Char::uppercase)} completed.")
         }
         
-        val startTimeMs = System.currentTimeMillis()
+        var activeDeadlineMs = monotonicNowMs() + budget.maxWallClockDurationMs
         var unchangedCount = 0
         var cumulativeWaitMs = 0L
         val actionHistory = mutableListOf<UiActionHistoryEntry>()
         val successfulFingerprints = mutableSetOf<String>()
         val actionRepetitions = mutableMapOf<String, Int>()
-        val goalAppCandidates = DeviceAction.findGoalAppCandidates(context, goal)
+        var goalAppCandidates = DeviceAction.findGoalAppCandidates(context, goal)
 
         DeviceAction.findExplicitGoalAppCandidate(context, goal)?.let { app ->
             val launchAction = UiActionStep.OpenApp(app.packageName)
             if (!observation.screen.packageName.equals(app.packageName, ignoreCase = true)) {
-                onProgress("Navigate", "Opening ${app.label} through the installed-app registry")
+                progress("Navigate", "Opening ${app.label} through the installed-app registry")
                 val launchPlan = UiActionPlan(goal, observation.screen.screenId, listOf(launchAction))
                 when (val decision = UiActionValidator.validate(launchPlan, observation.screen)) {
                     UiPlanDecision.Allow -> Unit
@@ -205,12 +254,62 @@ class UiAutomationOrchestrator(
             }
         }
 
-        val executionResult = kotlinx.coroutines.withTimeoutOrNull(budget.maxWallClockDurationMs) {
+        val executionResult = run execution@ {
             repeat(budget.maxExecutedActions) { actionIndex ->
-            onProgress("Plan ${actionIndex + 1}", "Choosing the next UI action")
+            val directiveWaitStartedMs = monotonicNowMs()
+            when (val directive = AutomationSessionManager.awaitDirective(sessionId)) {
+                AutomationSessionDirective.Cancel ->
+                    return@execution failure("Device control was stopped by the user.")
+                is AutomationSessionDirective.Run -> {
+                    if (directive.goal != goal) {
+                        trace(
+                            "session_steered",
+                            mapOf(
+                                "old_goal_hash" to hashContent(goal),
+                                "new_goal_hash" to hashContent(directive.goal)
+                            )
+                        )
+                        goal = directive.goal
+                        goalAppCandidates = DeviceAction.findGoalAppCandidates(context, goal)
+                        actionHistory.add(
+                            UiActionHistoryEntry(
+                                index = actionIndex,
+                                action = "steer",
+                                targetElementId = null,
+                                targetLabel = null,
+                                sourceScreenId = observation.screen.screenId,
+                                resultScreenId = observation.screen.screenId,
+                                outcome = Outcome.SUCCEEDED,
+                                changedScreen = false,
+                                detail = "Goal updated; all speculative downstream actions were discarded.",
+                                sourcePackage = observation.screen.packageName,
+                                resultPackage = observation.screen.packageName
+                            )
+                        )
+                    }
+                }
+            }
+            // A suspended session keeps its goal and checkpoint without consuming its active
+            // execution budget. Planner/action time remains bounded by the ordinary deadline.
+            activeDeadlineMs += monotonicNowMs() - directiveWaitStartedMs
+            if (monotonicNowMs() >= activeDeadlineMs) {
+                return@execution failure("UI automation reached its active wall-clock time limit.")
+            }
+            UiGoalCompletionEvaluator.evaluate(goal, observation.screen, goalAppCandidates)?.let { completion ->
+                trace(
+                    "goal_condition_satisfied",
+                    mapOf(
+                        "summary" to completion.summary,
+                        "screen_id" to observation.screen.screenId,
+                        "package" to observation.screen.packageName
+                    )
+                )
+                return@execution success(completion.summary)
+            }
+            progress("Plan ${actionIndex + 1}", "Choosing the next UI action")
             
             var rawPlan = plan(goal, observation, actionHistory, goalAppCandidates)
-                ?: return@withTimeoutOrNull failure("The UI planner returned no usable plan.")
+                ?: return@execution failure("The UI planner returned no usable plan.")
             var parsedPlan = parsePlan(rawPlan, goal, observation)
             
             var retries = 0
@@ -220,9 +319,9 @@ class UiAutomationOrchestrator(
                     "UiAutomation planner parse failed: $errorMsg; " +
                         "outputLength=${rawPlan.length} outputHash=${hashContent(rawPlan)}"
                 )
-                onProgress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
+                progress("Plan ${actionIndex + 1}", "Retrying with a strict JSON-only prompt")
                 rawPlan = plan(goal, observation, actionHistory, goalAppCandidates, jsonRetry = true)
-                    ?: return@withTimeoutOrNull failure("The UI planner returned no usable JSON after retry.")
+                    ?: return@execution failure("The UI planner returned no usable JSON after retry.")
                 parsedPlan = parsePlan(rawPlan, goal, observation)
                 retries++
             }
@@ -236,7 +335,7 @@ class UiAutomationOrchestrator(
                     "plan_parse_failed",
                     mapOf("error_type" to error::class.java.simpleName, "error_message" to error.message)
                 )
-                return@withTimeoutOrNull failure("The UI planner returned invalid action JSON after retry: ${error.message}")
+                return@execution failure("The UI planner returned invalid action JSON after retry: ${error.message}")
             }
             val actionPlan = planHorizon.firstExecutionSlice()
             trace(
@@ -267,7 +366,7 @@ class UiAutomationOrchestrator(
                 val isExplicitUnresolvedPackage = !wasResolvedForGoal &&
                     goal.lowercase().contains(action.packageName.lowercase())
                 if (!isStillRequired && !isExplicitUnresolvedPackage) {
-                    return@withTimeoutOrNull failure(
+                    return@execution failure(
                         "Planner requested app package '${action.packageName}' outside the remaining goal-relevant app set."
                     )
                 }
@@ -279,25 +378,25 @@ class UiAutomationOrchestrator(
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> {
                     logger("UiAutomation plan rejected: ${decision.reason}")
-                    return@withTimeoutOrNull failure(decision.reason)
+                    return@execution failure(decision.reason)
                 }
                 is UiPlanDecision.Block -> {
                     logger("UiAutomation plan blocked: ${decision.reason}")
-                    return@withTimeoutOrNull failure(decision.reason)
+                    return@execution failure(decision.reason)
                 }
                 is UiPlanDecision.RequireConfirmation -> {
-                    onProgress("Confirm", "Evaluating confirmation requirements")
+                    progress("Confirm", "Evaluating confirmation requirements")
                     val expectedDestination = expectedDestinationForCommit(action, observation.screen)
                     if (isMessagingCommitBoundary(action, observation.screen) && expectedDestination == null) {
-                        return@withTimeoutOrNull failure("Action blocked: no verified pending message is bound to this send action.")
+                        return@execution failure("Action blocked: no verified pending message is bound to this send action.")
                     }
                     val needsDestination = expectedDestination != null
                     var verifiedDestination: String? = null
                     if (needsDestination) {
                         when (val result = DestinationResolver.resolve(observation.screen, expectedDestination)) {
                             is DestinationResolver.DestinationResult.Verified -> verifiedDestination = result.observed
-                            is DestinationResolver.DestinationResult.Mismatch -> return@withTimeoutOrNull failure("Destination mismatch: observed '${result.observed}' but expected '${result.expected}'.")
-                            is DestinationResolver.DestinationResult.Unresolvable -> return@withTimeoutOrNull failure("Action blocked: ${result.reason}")
+                            is DestinationResolver.DestinationResult.Mismatch -> return@execution failure("Destination mismatch: observed '${result.observed}' but expected '${result.expected}'.")
+                            is DestinationResolver.DestinationResult.Unresolvable -> return@execution failure("Action blocked: ${result.reason}")
                         }
                     }
                     val userApproved = kotlinx.coroutines.withTimeoutOrNull(60_000) {
@@ -305,21 +404,21 @@ class UiAutomationOrchestrator(
                     } ?: false
                     
                     if (!userApproved) {
-                        return@withTimeoutOrNull failure("User denied UI action confirmation or timed out.")
+                        return@execution failure("User denied UI action confirmation or timed out.")
                     }
                     
                     val latestObservation = observe(requestScreenshot = false)
-                        ?: return@withTimeoutOrNull failure("Failed to re-observe screen for confirmation.")
+                        ?: return@execution failure("Failed to re-observe screen for confirmation.")
                     if (latestObservation.screen.screenId != observation.screen.screenId) {
-                        return@withTimeoutOrNull failure("Screen changed while awaiting confirmation. Action aborted.")
+                        return@execution failure("Screen changed while awaiting confirmation. Action aborted.")
                     }
 
                     // Re-verify destination after user confirmation
                     if (needsDestination && verifiedDestination != null) {
                         when (val recheck = DestinationResolver.resolve(latestObservation.screen, verifiedDestination)) {
                             is DestinationResolver.DestinationResult.Verified -> Unit
-                            is DestinationResolver.DestinationResult.Mismatch -> return@withTimeoutOrNull failure("Destination changed after confirmation: observed '${recheck.observed}' but expected '${recheck.expected}'.")
-                            is DestinationResolver.DestinationResult.Unresolvable -> return@withTimeoutOrNull failure("Destination unresolvable after confirmation: ${recheck.reason}")
+                            is DestinationResolver.DestinationResult.Mismatch -> return@execution failure("Destination changed after confirmation: observed '${recheck.observed}' but expected '${recheck.expected}'.")
+                            is DestinationResolver.DestinationResult.Unresolvable -> return@execution failure("Destination unresolvable after confirmation: ${recheck.reason}")
                         }
                     }
 
@@ -338,7 +437,7 @@ class UiAutomationOrchestrator(
                     )
                     
                     if (!ConfirmationManager.consumeConfirmation(grantId, sessionId, latestObservation.screen.screenId, updatedFingerprint, verifiedDestination, contentHash)) {
-                        return@withTimeoutOrNull failure("Confirmation expired or invalid.")
+                        return@execution failure("Confirmation expired or invalid.")
                     }
                 }
             }
@@ -347,7 +446,7 @@ class UiAutomationOrchestrator(
             if (successfulFingerprints.contains(fingerprint) && unchangedCount > 0) {
                 if (repCount >= budget.maxIdenticalActionUnchangedScreen) {
                     logger("UiAutomation repetion detected: fingerprint=$fingerprint")
-                    return@withTimeoutOrNull failure("Planner proposed a repetitive action that already succeeded on this exact screen without changing it.")
+                    return@execution failure("Planner proposed a repetitive action that already succeeded on this exact screen without changing it.")
                 }
                 
                 logger("UiAutomation repetion warned: fingerprint=$fingerprint")
@@ -367,11 +466,11 @@ class UiAutomationOrchestrator(
                     )
                 )
                 actionRepetitions[fingerprint] = repCount + 1
-                observation = observe() ?: return@withTimeoutOrNull failure("Failed to re-observe after repetition.")
+                observation = observe() ?: return@execution failure("Failed to re-observe after repetition.")
                 return@repeat
             }
 
-            onProgress("Decision ${actionIndex + 1}", "Planner selected ${actionLabel(action)}")
+            progress("Decision ${actionIndex + 1}", "Planner selected ${actionLabel(action)}")
             trace(
                 "action_selected",
                 mapOf(
@@ -382,12 +481,90 @@ class UiAutomationOrchestrator(
                 )
             )
             when (action) {
-                is UiActionStep.Done -> return@withTimeoutOrNull success(action.summary)
-                is UiActionStep.AskUser -> return@withTimeoutOrNull success("User input required: ${action.reason}")
+                is UiActionStep.Done -> {
+                    val explicitConditions = UiGoalCompletionEvaluator.compile(goal, goalAppCandidates)
+                    if (explicitConditions.isEmpty()) {
+                        return@execution success(action.summary)
+                    }
+                    actionHistory.add(
+                        UiActionHistoryEntry(
+                            index = actionIndex,
+                            action = actionLabel(action),
+                            targetElementId = null,
+                            targetLabel = null,
+                            sourceScreenId = observation.screen.screenId,
+                            resultScreenId = observation.screen.screenId,
+                            outcome = Outcome.FAILED,
+                            changedScreen = false,
+                            detail = "Completion rejected: the compiled success condition is not visible yet.",
+                            sourcePackage = observation.screen.packageName,
+                            resultPackage = observation.screen.packageName
+                        )
+                    )
+                    return@repeat
+                }
+                is UiActionStep.AskUser -> {
+                    if (isScheduled) {
+                        return@execution failure(
+                            "Scheduled device control needs user input but has no interactive control surface."
+                        )
+                    }
+                    if (!AutomationSessionManager.requestUserInput(sessionId, action.reason)) {
+                        return@execution failure("Device control could not preserve its pending user question.")
+                    }
+                    onUserQuestion(action.reason)
+                    progress("Needs input", action.reason)
+                    val foregrounded = ControlSurfaceCoordinator.showAndAwait(sessionId)
+                    trace(
+                        "user_question_presented",
+                        mapOf("foregrounded" to foregrounded, "message" to action.reason)
+                    )
+                    if (!foregrounded) {
+                        return@execution failure(
+                            "Nabu could not bring Chat forward for the required clarification."
+                        )
+                    }
+                    val inputWaitStartedMs = monotonicNowMs()
+                    val answer = AutomationSessionManager.awaitUserInput(sessionId)
+                    activeDeadlineMs += monotonicNowMs() - inputWaitStartedMs
+                    onUserQuestionCleared()
+                    if (answer.isNullOrBlank()) {
+                        return@execution failure("Device control was stopped while waiting for user input.")
+                    }
+                    val resumedObservation = observe()
+                        ?: return@execution failure(
+                            "Device control resumed, but the target screen could not be observed."
+                        )
+                    actionHistory.add(
+                        UiActionHistoryEntry(
+                            index = actionIndex,
+                            action = "user input",
+                            targetElementId = null,
+                            targetLabel = null,
+                            sourceScreenId = observation.screen.screenId,
+                            resultScreenId = resumedObservation.screen.screenId,
+                            outcome = Outcome.SUCCEEDED,
+                            changedScreen = resumedObservation.screen.screenId != observation.screen.screenId,
+                            detail = "Question: ${action.reason}\nAnswer: $answer",
+                            sourcePackage = observation.screen.packageName,
+                            resultPackage = resumedObservation.screen.packageName
+                        )
+                    )
+                    trace(
+                        "user_question_answered",
+                        mapOf(
+                            "message" to answer,
+                            "result_screen_id" to resumedObservation.screen.screenId,
+                            "result_package" to resumedObservation.screen.packageName
+                        )
+                    )
+                    observation = resumedObservation
+                    return@repeat
+                }
                 is UiActionStep.Wait -> {
                     val waitTime = action.milliseconds.coerceAtMost(budget.maxSingleWaitMs)
                     if (cumulativeWaitMs + waitTime > budget.maxCumulativeWaitMs) {
-                        return@withTimeoutOrNull failure("Wait budget exceeded.")
+                        return@execution failure("Wait budget exceeded.")
                     }
                     cumulativeWaitMs += waitTime
                     delay(waitTime)
@@ -408,7 +585,7 @@ class UiAutomationOrchestrator(
                     )
                 }
                 else -> {
-                    onProgress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
+                    progress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
                     val result = execute(action, observation, sessionId, goal)
                     trace(
                         "action_executed",
@@ -440,15 +617,15 @@ class UiAutomationOrchestrator(
                                 resultPackage = observation.screen.packageName
                             )
                         )
-                        observation = observe() ?: return@withTimeoutOrNull failure("UI action failed and screen could not be observed.")
+                        observation = observe() ?: return@execution failure("UI action failed and screen could not be observed.")
                         return@repeat
                     }
                 }
             }
 
-            onProgress("Verify ${actionIndex + 1}", "Observing the resulting screen")
+            progress("Verify ${actionIndex + 1}", "Observing the resulting screen")
             val next = observeAfterAction(observation, action)
-                ?: return@withTimeoutOrNull failure("UI action ran, but the resulting screen could not be observed.")
+                ?: return@execution failure("UI action ran, but the resulting screen could not be observed.")
             val assertion = actionPlan.steps.filterIsInstance<UiActionStep.Assert>().lastOrNull()?.condition
             val assertionMatched = assertion?.let { assertionMatches(it, next.screen) }
             val builtInPostcondition = UiActionPostconditionVerifier.verify(action, observation.screen, next.screen)
@@ -526,14 +703,29 @@ class UiAutomationOrchestrator(
                     "unchanged_count" to unchangedCount
                 )
             )
+            AutomationSessionManager.actionCompleted(
+                sessionId,
+                "${actionLabel(action)}: ${observation.screen.packageName} → ${next.screen.packageName}"
+            )
+            UiGoalCompletionEvaluator.evaluate(goal, next.screen, goalAppCandidates)?.let { completion ->
+                trace(
+                    "goal_condition_satisfied",
+                    mapOf(
+                        "summary" to completion.summary,
+                        "screen_id" to next.screen.screenId,
+                        "package" to next.screen.packageName
+                    )
+                )
+                return@execution success(completion.summary)
+            }
             if (unchangedCount >= budget.maxUnchangedObservations) {
-                return@withTimeoutOrNull failure("UI did not change after repeated actions; stopping automation.")
+                return@execution failure("UI did not change after repeated actions; stopping automation.")
             }
             observation = next
             }
             failure("UI action limit reached before the goal was verified.")
         }
-        return executionResult ?: failure("UI automation reached wall-clock time limit.")
+        return executionResult
     }
 
     private suspend fun observe(
@@ -623,7 +815,7 @@ class UiAutomationOrchestrator(
         }
         if (maxWaitMs <= 0) return observe()
 
-        onProgress("Transition", "Waiting for Android to settle after ${actionLabel(action)}")
+        progress("Transition", "Waiting for Android to settle after ${actionLabel(action)}")
         val deadline = monotonicNowMs() + maxWaitMs
         var latest: Observation? = null
         var observedSequence = previous.snapshotSequence
@@ -734,32 +926,51 @@ class UiAutomationOrchestrator(
             LlmMessage(role = "user", content = userContent, images = images)
         )
         val structuredStartedMs = monotonicNowMs()
-        backend.generateStructured(conversation, UI_DECISION_TOOLS)?.let { result ->
-            val raw = result.toolCall?.let(ConstrainedDecisionDecoder::toCanonicalJson)
-                ?: result.text
-            if (raw.isBlank()) {
-                logger("UiAutomation native structured generation returned no decision")
-                return null
-            }
-            onModelOutput(raw)
+        val structuredResult = try {
+            backend.generateStructured(conversation, UI_DECISION_TOOLS)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
             logger(
-                "UiAutomation native structured output screen=${observation.screen.screenId} " +
-                    "tool=${result.toolCall?.name ?: "text_fallback"} outputLength=${raw.length} " +
-                    "outputHash=${hashContent(raw)}"
+                "UiAutomation native structured generation failed; falling back to JSON: " +
+                    "${error::class.java.simpleName}: ${error.message}"
             )
-            trace(
-                "planner_output_received",
-                mapOf(
-                    "screen_id" to observation.screen.screenId,
-                    "package" to observation.screen.packageName,
-                    "planner_output" to raw,
-                    "output_length" to raw.length,
-                    "json_retry" to jsonRetry,
-                    "native_structured" to (result.toolCall != null),
-                    "latency_ms" to (monotonicNowMs() - structuredStartedMs)
+            null
+        }
+        structuredResult?.let { result ->
+            val raw = try {
+                result.toolCall?.let(ConstrainedDecisionDecoder::toCanonicalJson)
+                    ?: result.text
+            } catch (error: Exception) {
+                logger(
+                    "UiAutomation native structured decision was unusable; falling back to JSON: " +
+                        "${error::class.java.simpleName}: ${error.message}"
                 )
-            )
-            return raw
+                ""
+            }
+            if (raw.isBlank()) {
+                logger("UiAutomation native structured generation returned no decision; falling back to JSON")
+            } else {
+                onModelOutput(raw)
+                logger(
+                    "UiAutomation native structured output screen=${observation.screen.screenId} " +
+                        "tool=${result.toolCall?.name ?: "text_fallback"} outputLength=${raw.length} " +
+                        "outputHash=${hashContent(raw)}"
+                )
+                trace(
+                    "planner_output_received",
+                    mapOf(
+                        "screen_id" to observation.screen.screenId,
+                        "package" to observation.screen.packageName,
+                        "planner_output" to raw,
+                        "output_length" to raw.length,
+                        "json_retry" to jsonRetry,
+                        "native_structured" to (result.toolCall != null),
+                        "latency_ms" to (monotonicNowMs() - structuredStartedMs)
+                    )
+                )
+                return raw
+            }
         }
         val completion = CompletableDeferred<String?>()
         val completed = AtomicBoolean(false)
@@ -840,7 +1051,7 @@ class UiAutomationOrchestrator(
         when (policyDecision) {
             is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policyDecision.reason}")
             is IntentPolicyDecision.RequireConfirmation -> {
-                onProgress("Confirm", "Evaluating confirmation requirements")
+                progress("Confirm", "Evaluating confirmation requirements")
                 val expectedDestination = expectedDestinationForCommit(action, currentObservation.screen)
                 if (isMessagingCommitBoundary(action, currentObservation.screen) && expectedDestination == null) {
                     return failure("Action blocked: no verified pending message is bound to this send action.")
@@ -1111,6 +1322,15 @@ class UiAutomationOrchestrator(
             addProperty("screen_id", screen.screenId)
             addProperty("package", screen.packageName)
             addProperty("activity", screen.activityName)
+            val successConditions = UiGoalCompletionEvaluator.plannerDescriptions(
+                goal,
+                goalAppCandidates
+            )
+            if (successConditions.isNotEmpty()) {
+                add("success_conditions", JsonArray().apply {
+                    successConditions.forEach(::add)
+                })
+            }
             if (history.isNotEmpty()) {
                 val recentEntries = history.takeLast(8)
                 val olderEntries = history.dropLast(8)
@@ -1129,6 +1349,7 @@ class UiAutomationOrchestrator(
                         entry.resultPackage?.let { addProperty("result_package", it) }
                         addProperty("outcome", entry.outcome.name.lowercase())
                         addProperty("screen_changed", entry.changedScreen)
+                        entry.detail?.let { addProperty("detail", it) }
                     })
                 }
                 add("history", historyArray)
@@ -1321,6 +1542,13 @@ class UiAutomationOrchestrator(
     private fun failure(output: String) = ToolResult(CONTROL_UI_TOOL, output, true)
     private fun trace(name: String, fields: Map<String, Any?> = emptyMap()) {
         activeTrace?.emit(name, fields)
+    }
+
+    private fun progress(phase: String, detail: String) {
+        onProgress(phase, detail)
+        activeSessionId?.let { sessionId ->
+            AutomationSessionManager.progress(sessionId, phase, detail)
+        }
     }
 
     private fun actionLabel(action: UiActionStep): String = when (action) {

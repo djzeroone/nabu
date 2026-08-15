@@ -18,15 +18,33 @@ object ConstrainedDecisionDecoder {
             when (call.name) {
                 "ui_act" -> {
                     addProperty("kind", "act")
-                    call.arguments["op"]?.toString()?.let { addProperty("op", it) }
-                    call.arguments["target"]?.toString()?.let { addProperty("target", it) }
-                    call.arguments["expect"]?.toString()?.let { addProperty("expect", it) }
+                    val rawOperation = call.arguments["op"]?.toString().orEmpty()
+                    rawOperation.takeIf(String::isNotBlank)?.let { addProperty("op", it) }
+                    val target = listOf("target", "targetId", "target_id")
+                        .firstNotNullOfOrNull { key ->
+                            call.arguments[key]?.toString()?.let {
+                                extractPlannerElementId(it, allowBareIdField = true)
+                            }
+                        }
+                        ?: extractPlannerElementId(rawOperation)
+                    target?.let { addProperty("target", it) }
+                    val expectedEffect = call.arguments["expect"]?.toString()
+                        ?.takeIf(String::isNotBlank)
+                        ?: extractBundledField(rawOperation, "expect")
+                    expectedEffect?.let { addProperty("expect", it) }
                     val actionArguments = JsonObject()
                     ACTION_ARGUMENT_KEYS.forEach { key ->
                         call.arguments[key]?.let { value ->
                             actionArguments.add(key, JsonPrimitive(value.toString()))
                         }
                     }
+                    extractBundledField(rawOperation, "direction")
+                        ?.takeUnless { it.equals("undefined", ignoreCase = true) }
+                        ?.let { direction ->
+                            if (!actionArguments.has("direction")) {
+                                actionArguments.addProperty("direction", direction)
+                            }
+                        }
                     if (actionArguments.size() > 0) add("args", actionArguments)
                 }
                 "ui_ask" -> {
@@ -51,17 +69,36 @@ object ConstrainedDecisionDecoder {
         return when (kind) {
             "act" -> {
                 requireOnlyKeys(root, "v", "kind", "op", "target", "args", "expect")
-                val opString = root.requiredString("op").uppercase()
-                val operation = Operation.valueOf(opString)
-                val target = root.get("target")?.takeUnless { it.isJsonNull }?.asString?.let { PlannerElementId(it) }
-                val expectString = root.get("expect")?.takeUnless { it.isJsonNull }?.asString?.uppercase()
-                val expect = expectString?.let { ExpectedEffect.valueOf(it) }
+                val rawOperation = root.requiredString("op")
+                val operation = parseOperation(rawOperation)
+                val target = root.get("target")
+                    ?.takeUnless { it.isJsonNull }
+                    ?.asString
+                    ?.let { extractPlannerElementId(it, allowBareIdField = true) }
+                    ?.let(::PlannerElementId)
+                    ?: extractPlannerElementId(rawOperation)?.let(::PlannerElementId)
+                val expect = (root.get("expect")
+                    ?.takeUnless { it.isJsonNull }
+                    ?.asString ?: extractBundledField(rawOperation, "expect"))
+                    ?.let(::parseExpectedEffect)
                 
                 val argsObj = root.getAsJsonObject("args")
                 val arguments = mutableMapOf<String, String>()
                 argsObj?.entrySet()?.forEach { (k, v) ->
                     require(v.isJsonPrimitive) { "Action argument '$k' must be a primitive value." }
                     arguments[k] = v.asString
+                }
+                extractBundledField(rawOperation, "direction")
+                    ?.takeUnless { it.equals("undefined", ignoreCase = true) }
+                    ?.let { arguments.putIfAbsent("direction", it) }
+                if (operation == Operation.SCROLL && !arguments.containsKey("direction")) {
+                    arguments["direction"] = when {
+                        rawOperation.contains("down", ignoreCase = true) -> "down"
+                        rawOperation.contains("up", ignoreCase = true) -> "up"
+                        rawOperation.contains("left", ignoreCase = true) -> "left"
+                        rawOperation.contains("right", ignoreCase = true) -> "right"
+                        else -> "down"
+                    }
                 }
                 validateAct(operation, target, arguments)
                 
@@ -97,6 +134,73 @@ object ConstrainedDecisionDecoder {
             }
             else -> throw IllegalArgumentException("Unknown decision kind: $kind")
         }
+    }
+
+    /**
+     * Small local models often produce a semantically exact operation with a UI-oriented alias.
+     * Normalize only lossless aliases; schema and target validation still run afterward.
+     */
+    private fun parseOperation(raw: String): Operation {
+        val trimmed = raw.trim()
+        val stripped = when {
+            Regex("""(?i)^([a-zA-Z_]+)_(p\d+|e_[a-f0-9]+)$""").matches(trimmed) ->
+                trimmed.substringBeforeLast('_')
+            Regex("""(?i)^([a-zA-Z_]+)_x.*""").matches(trimmed) ->
+                trimmed.substringBefore("_x")
+            Regex("""(?i)^([a-zA-Z_]+)\s+target.*""").matches(trimmed) ->
+                trimmed.substringBefore(" target")
+            else -> trimmed
+        }
+        val operationToken = OPERATION_PREFIX.find(stripped)?.groupValues?.get(1).orEmpty()
+        val bundledSuffix = stripped.removePrefix(operationToken).trim()
+        require(
+            bundledSuffix.isBlank() || BUNDLED_FIELD_MARKER.containsMatchIn(bundledSuffix) || EXACT_PLANNER_ID.containsMatchIn(bundledSuffix)
+        ) {
+            "Unsupported bundled data in UI operation '$raw'."
+        }
+        val normalized = operationToken.lowercase()
+            .replace('-', '_')
+            .replace(' ', '_')
+        val canonical = when {
+            normalized.startsWith("tap") || normalized.startsWith("click") || normalized.startsWith("touch") || normalized.startsWith("select") -> "tap"
+            normalized.startsWith("long_press") || normalized.startsWith("longpress") || normalized.startsWith("hold") -> "long_press"
+            normalized.startsWith("type") || normalized.startsWith("enter") || normalized.startsWith("input") || normalized.startsWith("set_text") -> "type_text"
+            normalized.startsWith("scroll") || normalized.startsWith("swipe") -> "scroll"
+            normalized.startsWith("back") || normalized.startsWith("press_back") || normalized.startsWith("go_back") -> "press_back"
+            normalized.startsWith("home") || normalized.startsWith("press_home") || normalized.startsWith("go_home") -> "press_home"
+            normalized.startsWith("recents") || normalized.startsWith("recent_apps") || normalized.startsWith("press_recents") -> "press_recents"
+            normalized.startsWith("notification") || normalized.startsWith("open_notification") -> "open_notifications"
+            normalized.startsWith("quick_settings") || normalized.startsWith("open_quick_settings") -> "open_quick_settings"
+            normalized.startsWith("open_settings") -> "open_settings_page"
+            normalized.startsWith("open_app") -> "open_app"
+            normalized.startsWith("open_url") || normalized.startsWith("open_link") -> "open_url"
+            normalized.startsWith("open_cam") -> "open_camera"
+            normalized.startsWith("wait") -> "wait"
+            normalized.startsWith("share_text") -> "share_text"
+            normalized.startsWith("share_cap") || normalized.startsWith("share_media") -> "share_captured_media"
+            normalized.startsWith("focus") -> "focus"
+            else -> normalized
+        }
+        return Operation.entries.firstOrNull { it.name.equals(canonical, ignoreCase = true) }
+            ?: throw IllegalArgumentException(
+                "Unsupported UI operation '$raw'. Allowed operations: " +
+                    Operation.entries.joinToString { it.name.lowercase() } + "."
+            )
+    }
+
+    private fun parseExpectedEffect(raw: String): ExpectedEffect {
+        val normalized = raw.trim().lowercase()
+            .replace('-', '_')
+            .replace(' ', '_')
+        val canonical = when (normalized) {
+            "screen_change", "window_change" -> "surface_change"
+            "content_change", "state_change" -> "mutation"
+            "appears", "content_appears" -> "content_appear"
+            "none", "unchanged" -> "no_change"
+            else -> normalized
+        }
+        return ExpectedEffect.entries.firstOrNull { it.name.equals(canonical, ignoreCase = true) }
+            ?: throw IllegalArgumentException("Unsupported expected effect '$raw'.")
     }
 
     private fun validateAct(
@@ -144,6 +248,26 @@ object ConstrainedDecisionDecoder {
         return value
     }
 
+    private fun extractPlannerElementId(
+        raw: String,
+        allowBareIdField: Boolean = false
+    ): String? {
+        val trimmed = raw.trim()
+        if (allowBareIdField) {
+            EXACT_PLANNER_ID.matchEntire(trimmed)?.let { return it.value.lowercase() }
+            BARE_ID_FIELD.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it.lowercase() }
+        }
+        TARGET_ID_FIELD.find(trimmed)?.groupValues?.getOrNull(1)?.lowercase()?.let { return it }
+        return EXACT_PLANNER_ID.find(trimmed)?.value?.lowercase()
+    }
+
+    private fun extractBundledField(raw: String, field: String): String? =
+        Regex("""(?i)\b${Regex.escape(field)}\b\s*[:=]\s*["']?([a-zA-Z_-]+)""")
+            .find(raw)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+
     private val TARGET_REQUIRED_OPERATIONS = setOf(
         Operation.TAP,
         Operation.LONG_PRESS,
@@ -163,4 +287,14 @@ object ConstrainedDecisionDecoder {
         "target_package",
         "expected_destination"
     )
+
+    private val EXACT_PLANNER_ID = Regex("""(?i)(?:p\d+|e_[a-f0-9]+)""")
+    private val BARE_ID_FIELD =
+        Regex("""(?i)\b(?:id|target|target_?id)\b\s*[:=]\s*["']?((?:p\d+|e_[a-f0-9]+))\b""")
+    private val TARGET_ID_FIELD = Regex(
+        """(?i)\btarget(?:_?id)?\b\s*(?:[:=]\s*)?(?:\{\s*(?:"?id"?\s*[:=]\s*)?)?["']?((?:p\d+|e_[a-f0-9]+))\b"""
+    )
+    private val OPERATION_PREFIX = Regex("""^\s*([a-zA-Z][a-zA-Z_-]*)""")
+    private val BUNDLED_FIELD_MARKER =
+        Regex("""(?i)(?:\b(?:target|target_?id)\b\s*(?:[:=]|\{)|\b(?:expect|direction)\b\s*[:=])""")
 }

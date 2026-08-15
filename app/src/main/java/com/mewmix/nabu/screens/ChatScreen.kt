@@ -127,6 +127,8 @@ fun ChatScreen(
     val pendingAppSelection by viewModel.pendingAppSelection.collectAsState()
     val pendingUiActionConfirmation by viewModel.pendingUiActionConfirmation.collectAsState()
     val orchestration by viewModel.orchestration.collectAsState()
+    val isUiAutomationActive by viewModel.isUiAutomationActive.collectAsState()
+    val pendingAutomationQuestion by viewModel.pendingAutomationQuestion.collectAsState()
     val activeModelSupportsAudio = ModelCapabilityResolver.supportsAudioInput(context, activeModel)
     val clipboardManager = LocalClipboardManager.current
     val voiceRecorder = remember { VoiceAttachmentRecorder(context.applicationContext) }
@@ -938,7 +940,41 @@ fun ChatScreen(
                 }
             }
 
-            if (isLoading) {
+            pendingAutomationQuestion?.let { question ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .background(
+                            MaterialTheme.colorScheme.tertiaryContainer,
+                            RoundedCornerShape(16.dp)
+                        )
+                        .border(
+                            1.dp,
+                            MaterialTheme.colorScheme.tertiary,
+                            RoundedCornerShape(16.dp)
+                        )
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = "Nabu needs your input",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Text(
+                        text = question,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Text(
+                        text = "Reply below to resume from the same device-control checkpoint.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+
+            if (isLoading && pendingAutomationQuestion == null) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1066,6 +1102,21 @@ fun ChatScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 if (isLoading) {
+                    if (isUiAutomationActive) {
+                        BrutalIconButton(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "Steer device control",
+                            onClick = {
+                                if (message.isNotBlank()) {
+                                    viewModel.sendMessage(message)
+                                    message = ""
+                                    viewModel.updateDraft("")
+                                }
+                            },
+                            enabled = message.isNotBlank()
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     BrutalIconButton(
                         imageVector = Icons.Default.Stop,
                         contentDescription = "Stop",

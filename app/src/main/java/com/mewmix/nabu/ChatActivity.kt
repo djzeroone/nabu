@@ -49,6 +49,8 @@ import com.mewmix.nabu.ui.brutalist.BrutalButton
 import com.mewmix.nabu.ui.brutalist.PanelBox
 import com.mewmix.nabu.viewmodel.ChatViewModel
 import com.mewmix.nabu.chat.LlmRuntimeOverrides
+import com.mewmix.nabu.uiagent.AutomationSessionManager
+import com.mewmix.nabu.uiagent.ControlSurfaceCoordinator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,6 +59,7 @@ class ChatActivity : ComponentActivity() {
     companion object {
         const val EXTRA_INITIAL_PROMPT = "extra_initial_prompt"
         const val EXTRA_START_VOICE = "extra_start_voice"
+        const val EXTRA_GLOBAL_TRIGGER = "extra_global_trigger"
         const val EXTRA_LLM_THREADS_AUTO = "llm_threads_auto"
         const val EXTRA_LLM_THREADS = "llm_threads"
         const val EXTRA_LLM_THREADS_BATCH = "llm_threads_batch"
@@ -69,12 +72,24 @@ class ChatActivity : ComponentActivity() {
         fun createGlobalTriggerIntent(context: android.content.Context): Intent {
             return Intent(context, ChatActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(EXTRA_GLOBAL_TRIGGER, true)
             }
         }
     }
 
     private val llmOverrides: LlmRuntimeOverrides? by lazy { readLlmOverrides(intent) }
     private var parkedForUiAutomation = false
+
+    override fun onResume() {
+        super.onResume()
+        ControlSurfaceCoordinator.setChatForegroundState(true)
+        ControlSurfaceCoordinator.acknowledgeForegrounded()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ControlSurfaceCoordinator.setChatForegroundState(false)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -146,6 +161,7 @@ class ChatActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.getBooleanExtra(EXTRA_START_VOICE, false) ||
             intent.hasExtra(EXTRA_INITIAL_PROMPT) ||
+            intent.hasExtra("extra_handoff_session_id") ||
             intent.action == Intent.ACTION_SEND ||
             intent.action == Intent.ACTION_VIEW
         ) {
@@ -217,15 +233,37 @@ class ChatActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch {
+            ControlSurfaceCoordinator.parkRequest.collect { sessionId ->
+                if (sessionId == null) return@collect
+                parkedForUiAutomation = true
+                val moved = moveTaskToBack(true)
+                DebugLogger.log(
+                    "ChatActivity: control surface parked session=$sessionId moved=$moved"
+                )
+                ControlSurfaceCoordinator.acknowledgeParked(sessionId, moved)
+            }
+        }
+
+        lifecycleScope.launch {
+            ControlSurfaceCoordinator.foregroundRequest.collect { sessionId ->
+                if (sessionId == null) return@collect
+                parkedForUiAutomation = false
+                startActivity(
+                    Intent(this@ChatActivity, ChatActivity::class.java).addFlags(
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
+                )
+                DebugLogger.log(
+                    "ChatActivity: requested control surface foreground session=$sessionId"
+                )
+            }
+        }
+
+        lifecycleScope.launch {
             viewModel.isUiAutomationActive.collect { active ->
-                if (active && !parkedForUiAutomation) {
-                    parkedForUiAutomation = true
-                    moveTaskToBack(true)
-                } else if (!active && parkedForUiAutomation) {
-                    // Keep the chat task alive in the background so the user
-                    // can return to the verified result and action history.
-                    // Finishing here made successful Control runs look like
-                    // application crashes and discarded the active surface.
+                if (!active && parkedForUiAutomation && !AutomationSessionManager.hasRunningSession()) {
+                    // Keep the activity instance and ViewModel alive. Returning to Nabu restores
+                    // the same conversation, trace, and completed control result.
                     parkedForUiAutomation = false
                 }
             }

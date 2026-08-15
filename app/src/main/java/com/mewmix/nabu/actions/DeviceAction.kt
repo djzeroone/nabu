@@ -38,11 +38,18 @@ object DeviceAction {
     )
 
     internal var canResolveIntent: (Context, Intent) -> Boolean = { context, intent ->
-        intent.resolveActivity(context.packageManager) != null
+        if (intent.action?.startsWith("android.settings") == true || intent.action == Settings.ACTION_SETTINGS) {
+            true
+        } else {
+            intent.resolveActivity(context.packageManager) != null
+        }
     }
 
     internal var launchIntentForPackageResolver: (Context, String) -> Intent? = { context, packageName ->
         context.packageManager.getLaunchIntentForPackage(packageName)
+            ?: if (packageName.equals("com.android.settings", ignoreCase = true)) {
+                Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            } else null
     }
 
     internal var appNameResolver: (Context, String) -> String? = { context, appName ->
@@ -57,7 +64,7 @@ object DeviceAction {
     }
 
     internal var activityLauncher: (Context, Intent) -> Unit = { context, intent ->
-        context.startActivity(intent)
+        (com.mewmix.nabu.accessibility.NabuAccessibilityService.instance ?: context).startActivity(intent)
     }
 
     internal var mediaKeyDispatcher: (Context, Int) -> Unit = { context, keyCode ->
@@ -89,14 +96,25 @@ object DeviceAction {
     }
 
     internal fun resetForTesting() {
-        canResolveIntent = { context, intent -> intent.resolveActivity(context.packageManager) != null }
+        canResolveIntent = { context, intent ->
+            if (intent.action?.startsWith("android.settings") == true || intent.action == Settings.ACTION_SETTINGS) {
+                true
+            } else {
+                intent.resolveActivity(context.packageManager) != null
+            }
+        }
         launchIntentForPackageResolver = { context, packageName ->
             context.packageManager.getLaunchIntentForPackage(packageName)
+                ?: if (packageName.equals("com.android.settings", ignoreCase = true)) {
+                    Intent(Settings.ACTION_SETTINGS).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                } else null
         }
         appNameResolver = { context, appName -> findLaunchableApps(context, appName).firstOrNull()?.packageName }
         appCandidateResolver = { context, appName -> findLaunchableApps(context, appName) }
         appLabelLoader = { context, packageName -> loadAppLabel(context, packageName) }
-        activityLauncher = { context, intent -> context.startActivity(intent) }
+        activityLauncher = { context, intent ->
+            (com.mewmix.nabu.accessibility.NabuAccessibilityService.instance ?: context).startActivity(intent)
+        }
         mediaKeyDispatcher = { context, keyCode ->
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))

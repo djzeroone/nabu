@@ -57,11 +57,17 @@ import com.mewmix.nabu.accessibility.AccessibilityToolHandler
 import com.mewmix.nabu.tools.GlaiveBridge
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolCallProtocol
+import com.mewmix.nabu.tools.ConversationToolContextRouter
 import com.mewmix.nabu.tools.ToolRegistry
 import com.mewmix.nabu.tools.ToolResult
 import com.mewmix.nabu.actions.ActionTools
 import com.mewmix.nabu.actions.DeviceAction
 import com.mewmix.nabu.uiagent.UiAutomationOrchestrator
+import com.mewmix.nabu.uiagent.AutomationSessionManager
+import com.mewmix.nabu.uiagent.AutomationSessionState
+import com.mewmix.nabu.uiagent.ControlSurfaceCoordinator
+import com.mewmix.nabu.uiagent.AutomationFlowMode
+import com.mewmix.nabu.uiagent.AutomationFlowStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -107,12 +113,32 @@ data class OrchestrationUiState(
     val liveOutput: String = ""
 )
 
+private sealed interface AutomationChatCommand {
+    data object Pause : AutomationChatCommand
+    data object Resume : AutomationChatCommand
+    data object Stop : AutomationChatCommand
+    data object Status : AutomationChatCommand
+    data class Steer(val goal: String) : AutomationChatCommand
+}
+
+private sealed interface AutomationFlowCommand {
+    data class Save(
+        val name: String,
+        val goal: String,
+        val mode: AutomationFlowMode
+    ) : AutomationFlowCommand
+    data class Run(val name: String) : AutomationFlowCommand
+    data class Delete(val name: String) : AutomationFlowCommand
+    data object List : AutomationFlowCommand
+}
+
 class ChatViewModel(
     private val context: Context,
     initialModelId: String,
     private val llmOverrides: LlmRuntimeOverrides? = null
 ) : ViewModel() {
     private val requestedInitialModelId = initialModelId
+    private val conversationToolContextRouter = ConversationToolContextRouter(context)
 
     private val _pendingImage = MutableStateFlow<LlmImageInput?>(null)
     val pendingImage = _pendingImage.asStateFlow()
@@ -178,7 +204,16 @@ class ChatViewModel(
         private const val MAX_TOOL_CALLS_PER_TURN = 4
         private const val TOOL_EXECUTION_TIMEOUT_MS = 30_000L
         private const val MAX_LIVE_ORCHESTRATION_CHARS = 16_000
+        private const val DIRECT_UI_TRANSITION_TIMEOUT_MS = 900L
         private const val DEFAULT_SYSTEM_PROMPT = "You are a helpful AI assistant."
+        private val DIRECT_UI_TRANSITION_TOOLS = setOf(
+            "open_app",
+            "launch_package",
+            "open_url",
+            "navigate_to",
+            "take_photo",
+            "record_video"
+        )
         private val TOKEN_REGEX = Regex("\\S+")
         private val DIRECT_RESULT_TOOL_NAMES = setOf(
             "list_tools",
@@ -713,16 +748,87 @@ class ChatViewModel(
 
         internal fun explicitControlUiGoal(userMessage: String): String? {
             val match = Regex(
-                """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:control[\s_-]*ui|ui\s+automation)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.+?)\s*$"""
+                """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:control[\s_-]*ui|ui\s+automation)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.*?)\s*$"""
             ).find(userMessage) ?: return null
-            return match.groupValues[1].trim().takeIf { it.isNotEmpty() }
+            return match.groupValues[1].trim().ifBlank {
+                "Inspect the current screen without changing it and report what can be controlled."
+            }
         }
 
         internal fun explicitGuideUiGoal(userMessage: String): String? {
             val match = Regex(
-                """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:guide[\s_-]*ui|guide\s+me|walk\s+me\s+through)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.+?)\s*$"""
+                """(?is)^\s*(?:(?:please\s+)?(?:use|run|invoke)\s+(?:the\s+)?)?(?:guide[\s_-]*ui|guide\s+me|walk\s+me\s+through)(?:\s+tool)?\s*(?:[,;:-]\s*)?(?:(?:with\s+)?(?:the\s+)?goal\s*(?:is|=|:)\s*(?:to\s+)?|to\s+)?(.*?)\s*$"""
             ).find(userMessage) ?: return null
-            return match.groupValues[1].trim().takeIf { it.isNotEmpty() }
+            return match.groupValues[1].trim().ifBlank {
+                "Describe the current screen and focus the most useful next control."
+            }
+        }
+
+        private fun parseAutomationChatCommand(message: String): AutomationChatCommand? {
+            val normalized = message.trim()
+            if (Regex("""(?is)^(?:pause|suspend)(?:\s+(?:control[\s_-]*ui|device\s+control|automation|it))?[.!]?$""")
+                    .matches(normalized)
+            ) {
+                return AutomationChatCommand.Pause
+            }
+            if (Regex("""(?is)^(?:resume|continue)(?:\s+(?:control[\s_-]*ui|device\s+control|automation|it))?[.!]?$""")
+                    .matches(normalized)
+            ) {
+                return AutomationChatCommand.Resume
+            }
+            if (Regex("""(?is)^(?:stop|end|cancel)(?:\s+(?:control[\s_-]*ui|device\s+control|automation|it))?[.!]?$""")
+                    .matches(normalized)
+            ) {
+                return AutomationChatCommand.Stop
+            }
+            if (Regex("""(?is)^(?:control[\s_-]*ui|device\s+control|automation)\s+status\??$""")
+                    .matches(normalized) ||
+                Regex("""(?is)^status(?:\s+(?:control[\s_-]*ui|device\s+control|automation))?\??$""")
+                    .matches(normalized)
+            ) {
+                return AutomationChatCommand.Status
+            }
+            val steer = Regex(
+                """(?is)^(?:steer|redirect|change\s+(?:the\s+)?goal)(?:\s+(?:control[\s_-]*ui|device\s+control|automation|it))?\s*(?:to|:)\s*(.+?)\s*$"""
+            ).find(normalized)
+            return steer?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+                ?.let(AutomationChatCommand::Steer)
+        }
+
+        private fun parseAutomationFlowCommand(message: String): AutomationFlowCommand? {
+            val normalized = message.trim()
+            if (Regex("""(?is)^(?:list|show)(?:\s+(?:my|saved))?\s+(?:action\s+)?flows?[.!]?$""")
+                    .matches(normalized)
+            ) {
+                return AutomationFlowCommand.List
+            }
+            Regex("""(?is)^(?:run|replay|start)\s+(?:the\s+)?(?:saved\s+)?flow\s+(.+?)\s*$""")
+                .find(normalized)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return AutomationFlowCommand.Run(it) }
+            Regex("""(?is)^(?:delete|remove)\s+(?:the\s+)?(?:saved\s+)?flow\s+(.+?)\s*$""")
+                .find(normalized)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return AutomationFlowCommand.Delete(it) }
+            val save = Regex(
+                """(?is)^save\s+(?:(guide|control|action)\s+)?flow\s+(.+?)\s*:\s*(.+?)\s*$"""
+            ).find(normalized) ?: return null
+            val mode = if (save.groupValues[1].equals("guide", ignoreCase = true)) {
+                AutomationFlowMode.GUIDE
+            } else {
+                AutomationFlowMode.CONTROL
+            }
+            return AutomationFlowCommand.Save(
+                name = save.groupValues[2].trim(),
+                goal = save.groupValues[3].trim(),
+                mode = mode
+            )
         }
 
         private fun looksLikeCompoundAppUiRequest(userMessage: String): Boolean {
@@ -999,6 +1105,11 @@ class ChatViewModel(
     private val _isUiAutomationActive = MutableStateFlow(false)
     val isUiAutomationActive = _isUiAutomationActive.asStateFlow()
 
+    private val _pendingAutomationQuestion = MutableStateFlow(
+        AutomationSessionManager.session.value?.pendingQuestion
+    )
+    val pendingAutomationQuestion = _pendingAutomationQuestion.asStateFlow()
+
     fun resolveToolApproval(allow: Boolean) {
         pendingToolApprovalDeferred?.complete(allow)
         _pendingToolApproval.value = null
@@ -1137,6 +1248,11 @@ class ChatViewModel(
     }
 
     init {
+        viewModelScope.launch {
+            AutomationSessionManager.session.collect { session ->
+                _pendingAutomationQuestion.value = session?.pendingQuestion
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             if (_ttsEnabled.value) {
                 OnnxRuntimeManager.initialize(context.applicationContext)
@@ -1361,6 +1477,187 @@ class ChatViewModel(
         val image = _pendingImage.value
         val audio = _pendingAudioInput.value
         if (trimmed.isEmpty() && image == null && audio == null) return
+        if (image == null && audio == null) {
+            val waitingSession = AutomationSessionManager.session.value
+            val waitingCommand = parseAutomationChatCommand(trimmed)
+            if (waitingSession?.runnerAttached == true &&
+                waitingSession.state == AutomationSessionState.WAITING_FOR_USER &&
+                waitingCommand == null
+            ) {
+                val result = AutomationSessionManager.answerActive(trimmed)
+                DebugLogger.log("ChatViewModel automation answer: ${result.message}")
+                if (result.accepted) {
+                    appendAutomationUserAnswer(trimmed)
+                    _orchestration.value = _orchestration.value?.copy(
+                        status = "Resuming from clarification",
+                        entries = _orchestration.value?.entries.orEmpty() + ActionTraceEntry(
+                            phase = "User input",
+                            detail = "Clarification received; preserving the active checkpoint."
+                        ),
+                        isVisible = false
+                    )
+                    viewModelScope.launch {
+                        AccessibilityToolHandler.controlPlaneFailure(context)?.let { detail ->
+                            val status = "Device control remains suspended. $detail"
+                            DebugLogger.log(status)
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, status, Toast.LENGTH_LONG).show()
+                            }
+                            return@launch
+                        }
+                        val parked = ControlSurfaceCoordinator.parkAndAwait(waitingSession.sessionId)
+                        if (parked) {
+                            AutomationSessionManager.continueAfterPark(waitingSession.sessionId)
+                        } else {
+                            val status =
+                                "Device control remains suspended because Nabu could not verify that its control surface was parked."
+                            DebugLogger.log(status)
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, status, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                } else {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                    }
+                }
+                return
+            }
+            when (val flowCommand = parseAutomationFlowCommand(trimmed)) {
+                null -> Unit
+                AutomationFlowCommand.List -> {
+                    val flows = AutomationFlowStore.list(context)
+                    val response = if (flows.isEmpty()) {
+                        "No saved action flows yet."
+                    } else {
+                        flows.joinToString(
+                            prefix = "Saved action flows:\n",
+                            separator = "\n"
+                        ) { flow ->
+                            "• ${flow.name} [${flow.mode.name.lowercase()}]: ${flow.goal}"
+                        }
+                    }
+                    appendImmediateExchange(trimmed, response)
+                    return
+                }
+                is AutomationFlowCommand.Save -> {
+                    val saved = runCatching {
+                        AutomationFlowStore.save(
+                            context,
+                            flowCommand.name,
+                            flowCommand.goal,
+                            flowCommand.mode
+                        )
+                    }.getOrElse {
+                        appendImmediateExchange(trimmed, "Could not save flow: ${it.message}")
+                        return
+                    }
+                    appendImmediateExchange(
+                        trimmed,
+                        "Saved ${saved.mode.name.lowercase()} flow '${saved.name}'. " +
+                            "Say “run flow ${saved.name}” to replay it from any screen."
+                    )
+                    return
+                }
+                is AutomationFlowCommand.Delete -> {
+                    val deleted = AutomationFlowStore.delete(context, flowCommand.name)
+                    appendImmediateExchange(
+                        trimmed,
+                        if (deleted) {
+                            "Deleted flow '${flowCommand.name.trim()}'."
+                        } else {
+                            "I could not find a saved flow named '${flowCommand.name.trim()}'."
+                        }
+                    )
+                    return
+                }
+                is AutomationFlowCommand.Run -> {
+                    val flow = AutomationFlowStore.get(context, flowCommand.name)
+                    if (flow == null) {
+                        appendImmediateExchange(
+                            trimmed,
+                            "I could not find a saved flow named '${flowCommand.name.trim()}'."
+                        )
+                        return
+                    }
+                    val invocation = if (flow.mode == AutomationFlowMode.GUIDE) {
+                        "guide ui: ${flow.goal}"
+                    } else {
+                        "control ui: ${flow.goal}"
+                    }
+                    return sendMessage(invocation)
+                }
+            }
+            val currentSession = AutomationSessionManager.session.value
+            val explicitCommand = parseAutomationChatCommand(trimmed)
+            val implicitSteer = if (
+                explicitCommand == null &&
+                currentSession?.runnerAttached == true &&
+                currentSession.state == AutomationSessionState.SUSPENDED
+            ) {
+                AutomationChatCommand.Steer(trimmed)
+            } else {
+                null
+            }
+            val command = explicitCommand ?: implicitSteer
+            if (command != null) {
+                val result = when (command) {
+                    AutomationChatCommand.Pause -> AutomationSessionManager.suspendActive()
+                    AutomationChatCommand.Resume -> AutomationSessionManager.resumeActive()
+                    AutomationChatCommand.Stop -> AutomationSessionManager.cancelActive()
+                    AutomationChatCommand.Status -> AutomationSessionManager.status()
+                    is AutomationChatCommand.Steer ->
+                        AutomationSessionManager.steerActive(command.goal)
+                }
+                DebugLogger.log("ChatViewModel automation command: ${result.message}")
+                val restartGoal = result.restartGoal
+                if (restartGoal == null) {
+                    _orchestration.value = _orchestration.value?.copy(
+                        status = AutomationSessionManager.session.value?.phase ?: "Device control",
+                        entries = _orchestration.value?.entries.orEmpty() + ActionTraceEntry(
+                            phase = "Steer",
+                            detail = result.message
+                        ),
+                        isVisible = false
+                    )
+                    viewModelScope.launch(Dispatchers.Main) {
+                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                    }
+                    if (result.accepted &&
+                        (command is AutomationChatCommand.Resume ||
+                            command is AutomationChatCommand.Steer)
+                    ) {
+                        AutomationSessionManager.session.value?.sessionId?.let { sessionId ->
+                            viewModelScope.launch {
+                                AccessibilityToolHandler.controlPlaneFailure(context)?.let { detail ->
+                                    val message =
+                                        "Device control remains suspended. $detail"
+                                    DebugLogger.log(message)
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    }
+                                    return@launch
+                                }
+                                val parked = ControlSurfaceCoordinator.parkAndAwait(sessionId)
+                                if (parked) {
+                                    AutomationSessionManager.continueAfterPark(sessionId)
+                                } else {
+                                    val message =
+                                        "Device control remains suspended because Nabu could not verify that its control surface was parked."
+                                    DebugLogger.log(message)
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return
+                }
+                return sendMessage("control ui: $restartGoal")
+            }
+        }
         val conversationId = _activeConversationId.value ?: run {
             DebugLogger.log("No active conversation; ignoring message")
             return
@@ -1421,23 +1718,43 @@ class ChatViewModel(
                     "Plan",
                     directActionPlan.toolCalls.joinToString(" -> ") { it.toolName }
                 )
-                val results = directActionPlan.toolCalls.mapIndexed { index, call ->
+                val results = mutableListOf<ToolResult>()
+                directActionPlan.toolCalls.forEachIndexed { index, call ->
+                    val beforeSnapshot =
+                        com.mewmix.nabu.accessibility.UiSnapshotStore.currentSnapshot.value
                     recordOrchestration("Execute ${index + 1}", "Running ${call.toolName}", call.toolName)
-                    executeToolCallInternal(context.applicationContext, call).also { result ->
+                    val result = executeToolCallInternal(context.applicationContext, call)
+                    results += result
+                    recordOrchestration(
+                        "Result ${index + 1}",
+                        if (result.isError) "${call.toolName} failed" else "${call.toolName} completed",
+                        call.toolName,
+                        result.output,
+                        result.isError
+                    )
+                    val nextCall = directActionPlan.toolCalls.getOrNull(index + 1)
+                    if (!result.isError &&
+                        call.toolName in DIRECT_UI_TRANSITION_TOOLS &&
+                        nextCall?.toolName == "read_screen"
+                    ) {
                         recordOrchestration(
-                            "Result ${index + 1}",
-                            if (result.isError) "${call.toolName} failed" else "${call.toolName} completed",
-                            call.toolName,
-                            result.output,
-                            result.isError
+                            "Transition",
+                            "Waiting for the launched screen before reading it",
+                            call.toolName
                         )
+                        awaitFreshScreenTransition(beforeSnapshot)
                     }
                 }
                 val firstError = results.firstOrNull { it.isError }
                 val response = if (firstError != null) {
                     firstError.output
                 } else {
-                    directActionPlan.response
+                    directActionPlan.toolCalls.zip(results)
+                        .filter { (call, _) -> call.toolName == "read_screen" }
+                        .map { (_, result) -> result.output }
+                        .takeIf { it.isNotEmpty() }
+                        ?.joinToString("\n\n")
+                        ?: directActionPlan.response
                 }
                 finalizeDirectToolResponse(
                     response,
@@ -1745,14 +2062,86 @@ class ChatViewModel(
         }
     }
 
+    private fun appendImmediateExchange(userMessage: String, response: String) {
+        val image = _pendingImage.value
+        val audio = _pendingAudioInput.value
+        if (image != null || audio != null) return
+        beginSpeechSession(playbackAllowed = false)
+        _chatMessages.value += ChatMessage(userMessage, true)
+        conversationHistory.add(ConversationTurn(ConversationRole.USER, userMessage))
+        _chatMessages.value += ChatMessage(response, false)
+        conversationHistory.add(ConversationTurn(ConversationRole.AGENT, response))
+        persistConversationMessages()
+    }
+
+    private suspend fun presentAutomationQuestion(question: String) {
+        withContext(Dispatchers.Main) {
+            if (_chatMessages.value.lastOrNull()?.message == question &&
+                conversationHistory.lastOrNull()?.role == ConversationRole.AGENT &&
+                conversationHistory.lastOrNull()?.content == question
+            ) {
+                _pendingAutomationQuestion.value = question
+                return@withContext
+            }
+            _pendingAutomationQuestion.value = question
+            val last = _chatMessages.value.lastOrNull()
+            if (last != null && !last.isFromUser) {
+                _chatMessages.value =
+                    _chatMessages.value.dropLast(1) + last.copy(message = question)
+            } else {
+                _chatMessages.value += ChatMessage(question, false)
+            }
+            conversationHistory.add(ConversationTurn(ConversationRole.AGENT, question))
+            persistConversationMessages()
+        }
+    }
+
+    private fun appendAutomationUserAnswer(answer: String) {
+        _chatMessages.value += ChatMessage(answer, true)
+        conversationHistory.add(ConversationTurn(ConversationRole.USER, answer))
+        _chatMessages.value += ChatMessage("Resuming device control…", false)
+        _pendingAutomationQuestion.value = null
+        persistConversationMessages()
+    }
+
+    private suspend fun awaitFreshScreenTransition(
+        before: com.mewmix.nabu.accessibility.UiSnapshot?
+    ) {
+        if (before == null) {
+            delay(80L)
+            return
+        }
+        val deadlineMs = SystemClock.elapsedRealtime() + DIRECT_UI_TRANSITION_TIMEOUT_MS
+        var sequence = before.sequence
+        while (SystemClock.elapsedRealtime() < deadlineMs) {
+            val remainingMs = deadlineMs - SystemClock.elapsedRealtime()
+            val next = com.mewmix.nabu.accessibility.UiSnapshotStore.awaitAfter(
+                sequence = sequence,
+                timeoutMs = minOf(remainingMs, 150L)
+            ) ?: continue
+            if (next.packageName != before.packageName ||
+                next.stateFingerprint != before.stateFingerprint
+            ) {
+                return
+            }
+            sequence = next.sequence
+        }
+        // The subsequent read_screen force-captures again, so a quiet application still gets
+        // one final authoritative observation without a fixed multi-second sleep.
+    }
+
     fun cancelGeneration() {
         recordOrchestration("Cancel", "Stopping model and tool execution")
+        if (AutomationSessionManager.hasRunningSession()) {
+            AutomationSessionManager.cancelActive()
+        }
         llmBackend?.cancel()
         activeGenerationJob?.cancel()
         activeGenerationJob = null
         pendingUiActionConfirmationDeferred?.complete(false)
         pendingUiActionConfirmationDeferred = null
         _pendingUiActionConfirmation.value = null
+        _pendingAutomationQuestion.value = null
         _isLoading.value = false
         _orchestration.value = _orchestration.value?.copy(isVisible = false)
         _isUiAutomationActive.value = false
@@ -2281,25 +2670,19 @@ class ChatViewModel(
 
         addToolsForText(latestUserMessage)
 
-        if (looksLikeToolContinuation(normalized)) {
-            conversation
-                .asReversed()
-                .dropWhile { it.content.trim() == latestUserMessage }
-                .take(6)
-                .asReversed()
-                .forEach { turn -> addToolsForText(turn.content) }
-            if (selectedNames.isNotEmpty()) {
-                addTool("list_tools")
-            }
-        }
-
         val exactMatches = selectedNames.mapNotNull { toolsByName[it] }
         
         val fuzzyMatches = fuzzyMatchTools(normalized, availableTools, exactMatches.map { it.name }.toSet())
         
         val allMatches = (exactMatches + fuzzyMatches).distinctBy { it.name }
         
-        return allMatches.take(10)
+        return conversationToolContextRouter.resolve(
+            conversationId = _activeConversationId.value,
+            latestUserText = latestUserMessage,
+            retrievedTools = allMatches,
+            availableTools = availableTools,
+            limit = 10
+        )
     }
 
     private fun fuzzyMatchTools(
@@ -2388,11 +2771,6 @@ class ChatViewModel(
             Regex("""(?is)\b(?:turn|set|toggle|run|open|start|stop|send|text|message|compose|draft|list|read|find|search|write|create|delete|remove|compress|extract)\b.+\b(?:at|by)\s+(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight|tomorrow|tonight)\b""")
                 .containsMatchIn(text)
 
-    private fun looksLikeToolContinuation(text: String): Boolean =
-        Regex(
-            """(?is)^\s*(?:go ahead|do it|use (?:the )?tool(?:s)?(?: to do so)?|just use (?:the )?tool(?:s)?(?: to do so)?|and\??|yes|yeah|yep|ok(?:ay)?|continue|that one|it|make it .+|actually .+)\s*[.!?]*\s*$"""
-        ).containsMatchIn(text)
-
     private fun looksLikeCallRequest(text: String): Boolean =
         Regex("""(?is)^\s*(?:call|dial|place\s+call)\b""").containsMatchIn(text)
 
@@ -2479,6 +2857,12 @@ class ChatViewModel(
                         recordOrchestration(phase, detail, UiAutomationOrchestrator.CONTROL_UI_TOOL)
                     },
                     onModelOutput = ::appendOrchestrationOutput,
+                    onUserQuestion = ::presentAutomationQuestion,
+                    onUserQuestionCleared = {
+                        withContext(Dispatchers.Main) {
+                            _pendingAutomationQuestion.value = null
+                        }
+                    },
                     logger = DebugLogger::log
                 ).run(goal)
             } finally {
@@ -2490,19 +2874,49 @@ class ChatViewModel(
         }
         if (effectiveToolCall.toolName == com.mewmix.nabu.uiagent.UiGuideRunner.TOOL_NAME) {
             val goal = effectiveToolCall.arguments["goal"]?.toString()?.trim().orEmpty()
+            if (goal.isBlank()) {
+                return ToolResult(
+                    toolName = effectiveToolCall.toolName,
+                    output = "Guide goal is blank. The current screen was not changed.",
+                    isError = true
+                )
+            }
+            AccessibilityToolHandler.controlPlaneFailure(appContext)?.let { detail ->
+                DebugLogger.log("UiGuide preflight failed before parking Chat: $detail")
+                return ToolResult(
+                    toolName = effectiveToolCall.toolName,
+                    output = detail,
+                    isError = true
+                )
+            }
             val plannerBackend = llmBackend ?: return ToolResult(
                 toolName = effectiveToolCall.toolName,
                 output = "No LLM backend is available for UI guidance.",
                 isError = true
             )
-            return com.mewmix.nabu.uiagent.UiGuideRunner(
-                context = appContext,
-                backend = plannerBackend,
-                onProgress = { phase, detail ->
-                    recordOrchestration(phase, detail, com.mewmix.nabu.uiagent.UiGuideRunner.TOOL_NAME)
-                },
-                logger = DebugLogger::log
-            ).run(goal)
+            val guideSessionId = "guide-${java.util.UUID.randomUUID()}"
+            _isUiAutomationActive.value = true
+            _orchestration.value = _orchestration.value?.copy(isVisible = false)
+            return try {
+                if (!ControlSurfaceCoordinator.parkAndAwait(guideSessionId)) {
+                    return ToolResult(
+                        toolName = effectiveToolCall.toolName,
+                        output = "Nabu could not verify that Chat left the foreground, so guidance did not start.",
+                        isError = true
+                    )
+                }
+                com.mewmix.nabu.uiagent.UiGuideRunner(
+                    context = appContext,
+                    backend = plannerBackend,
+                    onProgress = { phase, detail ->
+                        recordOrchestration(phase, detail, com.mewmix.nabu.uiagent.UiGuideRunner.TOOL_NAME)
+                    },
+                    logger = DebugLogger::log
+                ).run(goal)
+            } finally {
+                ControlSurfaceCoordinator.clear(guideSessionId)
+                _isUiAutomationActive.value = false
+            }
         }
         ActionTools.execute(appContext, effectiveToolCall)?.let { return it }
 

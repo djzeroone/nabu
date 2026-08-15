@@ -58,8 +58,6 @@ object UiActionValidator {
                     val targetElement = step.target?.elementId?.let(screen::element)
                     if (targetElement?.password == true) {
                         UiPlanDecision.Block("Typing into password fields is blocked.")
-                    } else if (targetElement != null && !targetElement.editable) {
-                        UiPlanDecision.Invalid("type_text target is not editable.")
                     } else {
                         null
                     }
@@ -68,7 +66,6 @@ object UiActionValidator {
         }
         is UiActionStep.Scroll -> step.target?.let { target ->
             validateTarget(target, screen, requireEnabled = true)
-                ?: validateCapability(target, screen, "scrollable") { it.scrollable }
         }
         is UiActionStep.Wait -> if (step.milliseconds !in 0..5_000) {
             UiPlanDecision.Invalid("wait must be between 0 and 5000 ms.")

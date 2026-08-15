@@ -27,6 +27,7 @@ object ActionPlanner {
         val text = userMessage.lowercase(Locale.US)
         if (selectedTools.none { it.name != "list_tools" }) return false
         if (text.isBlank()) return false
+        if (requiresToolResultBeforeNextAction(userMessage, selectedTools)) return false
         if (selectedTools.any { it.name == "read_screen" } &&
             "screen" in text &&
             listOf("read", "describe", "what", "tell me", "inspect").any(text::contains)
@@ -70,6 +71,42 @@ object ActionPlanner {
             "extract"
         )
         return actionSignals.any { text.contains(it) }
+    }
+
+    /**
+     * Static action plans cannot bind a discovery result into a later call. Route those workflows
+     * to AgentTurnRunner, which replans after each tool result and can use the returned path/URI.
+     */
+    private fun requiresToolResultBeforeNextAction(
+        userMessage: String,
+        selectedTools: List<Tool>
+    ): Boolean {
+        if (CONCRETE_RESOURCE.containsMatchIn(userMessage)) return false
+        val text = userMessage.lowercase(Locale.US)
+        val hasDependentChainSignal = listOf(" then ", " and then ", " after ", " and read", " and open", " and delete", " and view").any { text.contains(it) }
+        if (!hasDependentChainSignal) return false
+        val hasDiscovery = selectedTools.any { tool ->
+            operationToken(tool.name) in DISCOVERY_OPERATIONS
+        }
+        if (!hasDiscovery) return false
+        return selectedTools.any { tool ->
+            operationToken(tool.name) !in DISCOVERY_OPERATIONS &&
+                tool.parameters.keys.any(::isResourceParameter)
+        }
+    }
+
+    private fun operationToken(toolName: String): String =
+        toolName.lowercase(Locale.US)
+            .split(Regex("""[^a-z0-9]+"""))
+            .firstOrNull()
+            .orEmpty()
+
+    private fun isResourceParameter(name: String): Boolean {
+        val normalized = name.lowercase(Locale.US)
+        return normalized == "path" ||
+            normalized.endsWith("_path") ||
+            normalized == "uri" ||
+            normalized.endsWith("_uri")
     }
 
     suspend fun planWithModel(
@@ -258,6 +295,12 @@ object ActionPlanner {
 
     private fun JsonElement.asJsonObjectOrNull(): JsonObject? =
         if (isJsonObject) asJsonObject else null
+
+    private val CONCRETE_RESOURCE =
+        Regex("""(?i)(?:^|\s)(?:/|content://|file://|[a-z]:\\)\S+""")
+    private val DISCOVERY_OPERATIONS = setOf(
+        "browse", "find", "list", "locate", "query", "search"
+    )
 
     private fun JsonElement.jsonObjectToMap(): Map<String, Any> {
         if (!isJsonObject) return emptyMap()

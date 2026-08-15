@@ -27,7 +27,11 @@
 
     <queries>
         <package android:name="com.mewmix.glaive" />
+        <package android:name="com.android.settings" />
 
+        <intent>
+            <action android:name="android.settings.SETTINGS" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
@@ -191,6 +195,14 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/nabu_voice_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".uiagent.ActionReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.mewmix.nabu.ACTION_EXECUTE" />
+            </intent-filter>
         </receiver>
 
         <service
