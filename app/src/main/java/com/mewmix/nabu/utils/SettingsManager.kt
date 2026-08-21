@@ -78,6 +78,14 @@ object SettingsManager {
     fun isDebug(context: Context): Boolean =
         (DatabaseManager.getSetting(context, "debug") ?: "0") == "1"
 
+    /** Dedicated structured-decision model. Blank means use the runtime's fast-model policy. */
+    fun setActionModelId(context: Context, modelId: String?) {
+        DatabaseManager.setSetting(context, "action_model_id", modelId?.trim().orEmpty())
+    }
+
+    fun getActionModelId(context: Context): String? =
+        DatabaseManager.getSetting(context, "action_model_id")?.trim()?.takeIf(String::isNotEmpty)
+
     fun setBenchmark(context: Context, enabled: Boolean) {
         DatabaseManager.setSetting(context, "benchmark", if (enabled) "1" else "0")
     }

@@ -12,9 +12,11 @@ import com.mewmix.nabu.data.OAuthRemoteModels
 import com.mewmix.nabu.data.ConversationRepository
 import com.mewmix.nabu.tools.ToolResult
 import com.mewmix.nabu.utils.DebugLogger
+import com.mewmix.nabu.utils.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,6 +36,7 @@ object ActionRequestDispatcher {
     val activeSession = _activeSession.asStateFlow()
 
     private var activeJob: Job? = null
+    private val ownership = ActionRequestOwnership()
     private var cachedBackend: Pair<String, LlmBackend>? = null
 
     fun submitRequest(
@@ -47,7 +50,7 @@ object ActionRequestDispatcher {
     ): ActionSession {
         val requestReceivedMs = System.currentTimeMillis()
         val normalized = request.trim()
-        val session = synchronized(lock) {
+        val (session, epoch) = synchronized(lock) {
             activeJob?.cancel()
             val newSession = ActionSession(
                 id = UUID.randomUUID().toString(),
@@ -60,42 +63,43 @@ object ActionRequestDispatcher {
                     sessionCreatedMs = System.currentTimeMillis()
                 )
             )
+            val epoch = ownership.begin(newSession.id)
             _activeSession.value = newSession
-            newSession
+            newSession to epoch
         }
 
-        scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             dispatchMutex.withLock {
-                synchronized(lock) {
-                    activeJob = coroutineContext[Job]
-                }
+                if (!isOwner(session.id, epoch)) return@withLock
                 val result = executeSessionTurn(
                     context = context.applicationContext,
                     session = session,
                     goal = normalized,
                     preferredModelId = preferredModelId,
                     requestConfirmation = requestConfirmation,
-                    onStep = onStep
+                    onStep = onStep,
+                    epoch = epoch
                 )
-                synchronized(lock) {
-                    val current = _activeSession.value ?: session
-                    if (current.id == session.id) {
-                        val endMs = System.currentTimeMillis()
-                        val updatedMetrics = current.metrics.copy(
-                            totalSessionLatencyMs = endMs - current.createdAtMs
-                        )
-                        val updatedSession = current.copy(
-                            status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
-                            lastVerificationResult = result.output,
-                            metrics = updatedMetrics,
-                            updatedAtMs = endMs
-                        )
-                        _activeSession.value = updatedSession
-                    }
+                val published = updateOwned(session.id, epoch) { current ->
+                    val endMs = System.currentTimeMillis()
+                    val updatedMetrics = current.metrics.copy(
+                        totalSessionLatencyMs = endMs - current.createdAtMs
+                    )
+                    current.copy(
+                        status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
+                        lastVerificationResult = result.output,
+                        metrics = updatedMetrics,
+                        updatedAtMs = endMs
+                    )
                 }
-                onComplete?.invoke(result)
+                synchronized(lock) { if (isOwnerLocked(session.id, epoch)) activeJob = null }
+                if (published) onComplete?.invoke(result)
             }
         }
+        synchronized(lock) {
+            if (isOwnerLocked(session.id, epoch)) activeJob = job else job.cancel()
+        }
+        job.start()
 
         return session
     }
@@ -110,7 +114,7 @@ object ActionRequestDispatcher {
         onComplete: ((ToolResult) -> Unit)? = null
     ): ActionSession? {
         val normalized = followUpRequest.trim()
-        val session = synchronized(lock) {
+        val (session, epoch) = synchronized(lock) {
             val current = _activeSession.value ?: return null
             if (current.id != sessionId) return null
             activeJob?.cancel()
@@ -119,38 +123,39 @@ object ActionRequestDispatcher {
                 status = ActionSessionStatus.PLANNING,
                 updatedAtMs = System.currentTimeMillis()
             )
+            val epoch = ownership.begin(updated.id)
             _activeSession.value = updated
-            updated
+            updated to epoch
         }
 
-        scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             dispatchMutex.withLock {
-                synchronized(lock) {
-                    activeJob = coroutineContext[Job]
-                }
+                if (!isOwner(session.id, epoch)) return@withLock
                 val result = executeSessionTurn(
                     context = context.applicationContext,
                     session = session,
                     goal = normalized,
                     preferredModelId = preferredModelId,
                     requestConfirmation = requestConfirmation,
-                    onStep = onStep
+                    onStep = onStep,
+                    epoch = epoch
                 )
-                synchronized(lock) {
-                    val current = _activeSession.value ?: session
-                    if (current.id == sessionId) {
-                        val endMs = System.currentTimeMillis()
-                        val updated = current.copy(
-                            status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
-                            lastVerificationResult = result.output,
-                            updatedAtMs = endMs
-                        )
-                        _activeSession.value = updated
-                    }
+                val published = updateOwned(sessionId, epoch) { current ->
+                    val endMs = System.currentTimeMillis()
+                    current.copy(
+                        status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
+                        lastVerificationResult = result.output,
+                        updatedAtMs = endMs
+                    )
                 }
-                onComplete?.invoke(result)
+                synchronized(lock) { if (isOwnerLocked(session.id, epoch)) activeJob = null }
+                if (published) onComplete?.invoke(result)
             }
         }
+        synchronized(lock) {
+            if (isOwnerLocked(session.id, epoch)) activeJob = job else job.cancel()
+        }
+        job.start()
 
         return session
     }
@@ -159,6 +164,7 @@ object ActionRequestDispatcher {
         synchronized(lock) {
             val current = _activeSession.value ?: return
             if (current.id == sessionId) {
+                ownership.invalidate(sessionId)
                 activeJob?.cancel()
                 activeJob = null
                 val updated = current.copy(
@@ -174,6 +180,7 @@ object ActionRequestDispatcher {
     fun clearSession(sessionId: String) {
         synchronized(lock) {
             if (_activeSession.value?.id == sessionId) {
+                ownership.invalidate(sessionId)
                 activeJob?.cancel()
                 activeJob = null
                 _activeSession.value = null
@@ -190,6 +197,7 @@ object ActionRequestDispatcher {
                 AutomationSessionManager.suspendActive("Handoff to Chat screen requested by user.")
             }
             activeJob?.cancel()
+            ownership.invalidate(sessionId)
             activeJob = null
             val updated = current.copy(
                 status = ActionSessionStatus.IDLE,
@@ -214,7 +222,8 @@ object ActionRequestDispatcher {
         goal: String,
         preferredModelId: String?,
         requestConfirmation: (suspend (String) -> Boolean)?,
-        onStep: ((ActionStepRecord) -> Unit)?
+        onStep: ((ActionStepRecord) -> Unit)?,
+        epoch: Long
     ): ToolResult {
         val backend = resolveOrInitBackend(context, preferredModelId)
             ?: return ToolResult(
@@ -241,8 +250,7 @@ object ActionRequestDispatcher {
             isScheduled = false,
             priorTurns = session.turns,
             onProgress = { phase, detail ->
-                synchronized(lock) {
-                    val current = _activeSession.value ?: session
+                updateOwned(session.id, epoch) { current ->
                     val newStatus = when (phase.lowercase()) {
                         "observe" -> ActionSessionStatus.OBSERVING
                         "plan", "planning" -> ActionSessionStatus.PLANNING
@@ -250,50 +258,64 @@ object ActionRequestDispatcher {
                         "verify", "transition" -> ActionSessionStatus.VERIFYING
                         else -> current.status
                     }
-                    val updated = current.copy(
+                    current.copy(
                         status = newStatus,
                         pendingObjective = detail,
                         updatedAtMs = System.currentTimeMillis()
                     )
-                    _activeSession.value = updated
                 }
             },
             onStepRecord = { stepRecord ->
-                synchronized(lock) {
-                    val current = _activeSession.value ?: session
+                val published = updateOwned(session.id, epoch) { current ->
                     val updatedSteps = current.stepHistory + stepRecord
-                    val updated = current.copy(
+                    current.copy(
                         stepHistory = updatedSteps,
                         lastObservedPackage = stepRecord.resultPackage ?: stepRecord.sourcePackage,
                         updatedAtMs = System.currentTimeMillis()
                     )
-                    _activeSession.value = updated
                 }
-                onStep?.invoke(stepRecord)
+                if (published) onStep?.invoke(stepRecord)
             },
+            externalSessionId = session.id,
             logger = { line ->
                 DebugLogger.log("ActionSession[${session.id.take(8)}]: $line")
             }
         )
 
         val result = orchestrator.run(goal)
-        val finalTurn = turn.copy(
-            assistantResponse = result.output,
-            stepRecords = session.stepHistory,
-            isComplete = true,
-            isError = result.isError
-        )
-        synchronized(lock) {
-            val current = _activeSession.value ?: session
+        updateOwned(session.id, epoch) { current ->
+            val finalTurn = turn.copy(
+                assistantResponse = result.output,
+                stepRecords = current.stepHistory,
+                isComplete = true,
+                isError = result.isError
+            )
             val updatedTurns = current.turns + finalTurn
-            val updated = current.copy(
+            current.copy(
                 turns = updatedTurns,
                 lastVerificationResult = result.output,
                 updatedAtMs = System.currentTimeMillis()
             )
-            _activeSession.value = updated
         }
         return result
+    }
+
+    private fun isOwner(sessionId: String, epoch: Long): Boolean = synchronized(lock) {
+        isOwnerLocked(sessionId, epoch)
+    }
+
+    private fun isOwnerLocked(sessionId: String, epoch: Long): Boolean =
+        ownership.owns(sessionId, epoch) && _activeSession.value?.id == sessionId
+
+    private fun updateOwned(
+        sessionId: String,
+        epoch: Long,
+        transform: (ActionSession) -> ActionSession
+    ): Boolean = synchronized(lock) {
+        if (!isOwnerLocked(sessionId, epoch)) return@synchronized false
+        val current = _activeSession.value ?: return@synchronized false
+        _activeSession.value = transform(current)
+        true
     }
 
     private suspend fun resolveOrInitBackend(context: Context, preferredModelId: String?): LlmBackend? = withContext(Dispatchers.IO) {
@@ -303,8 +325,12 @@ object ActionRequestDispatcher {
         val available = (downloaded + remote).distinctBy { it.id }
         if (available.isEmpty()) return@withContext null
 
-        val selectedModel = if (!preferredModelId.isNullOrBlank()) {
-            available.firstOrNull { it.id == preferredModelId || it.id.contains(preferredModelId, ignoreCase = true) }
+        val configuredModelId = preferredModelId?.takeIf(String::isNotBlank)
+            ?: SettingsManager.getActionModelId(context)
+        val selectedModel = if (!configuredModelId.isNullOrBlank()) {
+            available.firstOrNull {
+                it.id == configuredModelId || it.id.contains(configuredModelId, ignoreCase = true)
+            }
         } else {
             // Prioritize fast on-device action models first
             available.firstOrNull { it.isDownloaded && it.type == ModelType.LLM && (
@@ -313,7 +339,10 @@ object ActionRequestDispatcher {
                 it.id.contains("2b", ignoreCase = true) ||
                 it.id.contains("3b", ignoreCase = true)
             ) } ?: preferredRecentModel(context, available) ?: available.first()
-        } ?: return@withContext null
+        } ?: run {
+            DebugLogger.log("ActionRequestDispatcher: configured action model '$configuredModelId' is unavailable")
+            return@withContext null
+        }
 
         synchronized(lock) {
             cachedBackend?.let { (id, backend) ->
