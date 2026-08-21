@@ -39,6 +39,7 @@ class UiAutomationOrchestrator(
     private val onStepRecord: ((ActionStepRecord) -> Unit)? = null,
     private val onUserQuestion: suspend (String) -> Unit = {},
     private val onUserQuestionCleared: suspend () -> Unit = {},
+    private val externalSessionId: String? = null,
     private val logger: (String) -> Unit = {}
 ) {
     private data class Observation(
@@ -62,9 +63,13 @@ class UiAutomationOrchestrator(
     private var pendingExternalEffect: PendingExternalEffect? = null
     private var activeTrace: AutomationTraceRecorder? = null
     private var activeSessionId: String? = null
+    private var invocationStartedMonotonicMs: Long = 0L
+    private var firstPhysicalActionRecorded: Boolean = false
 
     suspend fun run(goal: String): ToolResult {
-        val sessionId = UUID.randomUUID().toString()
+        invocationStartedMonotonicMs = monotonicNowMs()
+        firstPhysicalActionRecorded = false
+        val sessionId = externalSessionId ?: UUID.randomUUID().toString()
         val trace = AutomationTraceRecorder(sessionId, logger)
         trace.emit("session_requested", mapOf("goal" to goal, "scheduled" to isScheduled))
         if (!sessionMutex.tryLock()) {
@@ -483,6 +488,7 @@ class UiAutomationOrchestrator(
                     "package" to observation.screen.packageName
                 )
             )
+            var executedResult: ToolResult? = null
             when (action) {
                 is UiActionStep.Done -> {
                     val explicitConditions = UiGoalCompletionEvaluator.compile(goal, goalAppCandidates)
@@ -590,6 +596,7 @@ class UiAutomationOrchestrator(
                 else -> {
                     progress("Execute ${actionIndex + 1}", "Running ${actionLabel(action)}")
                     val result = execute(action, observation, sessionId, goal)
+                    executedResult = result
                     trace(
                         "action_executed",
                         mapOf(
@@ -721,7 +728,13 @@ class UiAutomationOrchestrator(
                 verification = postconditionDetail,
                 latencyMs = monotonicNowMs() - stepStartMs,
                 sourcePackage = observation.screen.packageName,
-                resultPackage = next.screen.packageName
+                resultPackage = next.screen.packageName,
+                actionFamily = actionFamily(action),
+                semanticAction = actionLabel(action),
+                executionMechanism = executionMechanism(action, executedResult),
+                verificationStatus = builtInPostcondition.status.name.lowercase(),
+                sourceWindow = observation.screen.activityName,
+                resultWindow = next.screen.activityName
             )
             onStepRecord?.invoke(stepRecord)
             UiGoalCompletionEvaluator.evaluate(goal, next.screen, goalAppCandidates)?.let { completion ->
@@ -1136,6 +1149,35 @@ class UiAutomationOrchestrator(
                 addTarget(arguments, action.target, currentObservation.screen)
                 "ui_focus"
             }
+            is UiActionStep.NodeAction -> {
+                addTarget(arguments, action.target, currentObservation.screen)
+                arguments["node_action"] = action.action
+                arguments.putAll(action.arguments)
+                "ui_node_action"
+            }
+            is UiActionStep.CustomAction -> {
+                addTarget(arguments, action.target, currentObservation.screen)
+                val element = action.target.elementId?.let(currentObservation.screen::element)
+                    ?: return failure("Custom action target is unavailable.")
+                val custom = element.customActions.singleOrNull { it.ref == action.actionRef }
+                    ?: return failure("Custom action ref expired with its observation.")
+                arguments["trusted_action_id"] = custom.trustedActionId
+                arguments["custom_action_label"] = custom.label
+                "ui_custom_action"
+            }
+            is UiActionStep.Gesture -> {
+                addTarget(arguments, action.target, currentObservation.screen)
+                arguments["gesture"] = action.gesture
+                arguments.putAll(action.arguments)
+                action.destination?.let { destination ->
+                    val destinationElement = destination.elementId?.let(currentObservation.screen::element)
+                        ?: return failure("Gesture destination is unavailable.")
+                    arguments["destination_selector"] = selectorFor(destinationElement)
+                    destinationElement.bounds?.let { arguments["destination_bounds"] = it.toList() }
+                        ?: return failure("Gesture destination has no observed bounds.")
+                }
+                "ui_gesture"
+            }
             is UiActionStep.LongPress -> {
                 addTarget(arguments, action.target, currentObservation.screen)
                 "ui_long_press"
@@ -1170,15 +1212,22 @@ class UiAutomationOrchestrator(
                 arguments["global_action"] = "quick_settings"
                 "ui_global_action"
             }
+            is UiActionStep.GlobalAction -> {
+                arguments["global_action"] = action.action
+                "ui_global_action"
+            }
             is UiActionStep.OpenApp -> {
+                markPhysicalActionDispatch(action)
                 val result = DeviceAction.openApp(context, action.packageName, "")
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.OpenSettingsPage -> {
+                markPhysicalActionDispatch(action)
                 val result = DeviceAction.openSettingsPage(context, action.page.name, action.packageName)
                 return if (result.isError) failure(result.message) else success(result.message)
             }
             is UiActionStep.OpenUrl -> {
+                markPhysicalActionDispatch(action)
                 val result = DeviceAction.openUrl(context, action.url)
                 return if (result.isError) failure(result.message) else success(result.message)
             }
@@ -1188,6 +1237,7 @@ class UiAutomationOrchestrator(
                 ) {
                     return failure("Expected destination must be explicitly present in the user's goal.")
                 }
+                markPhysicalActionDispatch(action)
                 val result = DeviceAction.shareText(context, action.text, "", action.targetPackage)
                 if (!result.isError && action.targetPackage != null && action.expectedDestination != null) {
                     pendingExternalEffect = PendingExternalEffect(
@@ -1208,6 +1258,7 @@ class UiAutomationOrchestrator(
                     AutomationMediaManager.createCaptureOutputUri(context, mimeType)
                 }.getOrElse { return failure("Unable to create trusted capture output: ${it.message}") }
                 pendingMediaUris += outputUri
+                markPhysicalActionDispatch(action)
                 val result = if (action.mode == CameraMode.VIDEO) {
                     DeviceAction.recordVideo(context, action.facing.name, outputUri)
                 } else {
@@ -1226,6 +1277,7 @@ class UiAutomationOrchestrator(
                 val mediaHash = AutomationMediaManager.contentSha256(context, capture.uri)
                     ?: return failure("Unable to hash captured media.")
                 AutomationMediaManager.grantUriReadPermission(context, capture.uri, action.targetPackage)
+                markPhysicalActionDispatch(action)
                 val result = DeviceAction.shareMedia(
                     context = context,
                     uri = capture.uri,
@@ -1243,8 +1295,18 @@ class UiAutomationOrchestrator(
             }
             else -> return failure("Unsupported executable UI action.")
         }
+        val dispatchStartedMs = markPhysicalActionDispatch(action)
         val result = AccessibilityToolHandler.execute(context, ToolCall(toolName, arguments))
             ?: failure("Unknown UI tool: $toolName")
+        trace(
+            "action_dispatch_completed",
+            mapOf(
+                "action" to actionLabel(action),
+                "mechanism" to executionMechanism(action, result),
+                "success" to !result.isError,
+                "latency_ms" to (monotonicNowMs() - dispatchStartedMs)
+            )
+        )
         if (!result.isError && isMessagingCommitBoundary(action, currentObservation.screen)) {
             pendingExternalEffect = null
         }
@@ -1258,17 +1320,19 @@ class UiAutomationOrchestrator(
     ) {
         val element = target.elementId?.let(screen::element)
         if (element != null) {
-            arguments["selector"] = mapOf(
-                "tree_path" to element.treePath,
-                "resource_id" to element.resourceId.orEmpty(),
-                "text" to element.text.orEmpty(),
-                "content_desc" to element.contentDescription.orEmpty(),
-                "class" to element.className.orEmpty()
-            )
+            arguments["selector"] = selectorFor(element)
         }
         val bounds = element?.bounds ?: target.fallbackBounds
         if (bounds != null) arguments["fallback_bounds"] = bounds.toList()
     }
+
+    private fun selectorFor(element: UiElement): Map<String, String> = mapOf(
+        "tree_path" to element.treePath,
+        "resource_id" to element.resourceId.orEmpty(),
+        "text" to element.text.orEmpty(),
+        "content_desc" to element.contentDescription.orEmpty(),
+        "class" to element.className.orEmpty()
+    )
 
     private fun assertionMatches(assertion: UiAssertion, screen: UiScreenState): Boolean {
         val element = assertion.elementId?.let(screen::element)
@@ -1310,14 +1374,18 @@ class UiAutomationOrchestrator(
                         if (screen.plannerLabel(element) == null) {
                             element.resourceId?.let { addProperty("resource_id", it) }
                         }
-                        add("capabilities", JsonArray().apply {
-                            if (element.clickable || element.checkable) add("tap")
-                            if (element.longClickable) add("long_press")
-                            if (element.editable) add("type_text")
-                            if (element.scrollable) add("scroll")
+                        add("actions", JsonArray().apply {
+                            plannerActions(element).forEach(::add)
+                            element.customActions.forEach { custom ->
+                                add(JsonObject().apply {
+                                    addProperty("ref", custom.ref)
+                                    addProperty("label", custom.label)
+                                })
+                            }
                         })
                         if (element.checkable) addProperty("checked", element.checked)
                         if (element.password) addProperty("password", true)
+                        element.range?.let { range -> add("range", plannerRange(range)) }
                     } else {
                         element.resourceId?.let { addProperty("resource_id", it) }
                         element.className?.let { addProperty("class", it) }
@@ -1331,6 +1399,16 @@ class UiAutomationOrchestrator(
                         addProperty("checkable", element.checkable)
                         addProperty("checked", element.checked)
                         addProperty("password", element.password)
+                        add("actions", JsonArray().apply {
+                            plannerActions(element).forEach(::add)
+                            element.customActions.forEach { custom ->
+                                add(JsonObject().apply {
+                                    addProperty("ref", custom.ref)
+                                    addProperty("label", custom.label)
+                                })
+                            }
+                        })
+                        element.range?.let { range -> add("range", plannerRange(range)) }
                     }
                 })
             }
@@ -1339,6 +1417,7 @@ class UiAutomationOrchestrator(
             addProperty("screen_id", screen.screenId)
             addProperty("package", screen.packageName)
             addProperty("activity", screen.activityName)
+            add("system_actions", JsonArray().apply { screen.systemActions.sorted().forEach(::add) })
             val successConditions = UiGoalCompletionEvaluator.plannerDescriptions(
                 goal,
                 goalAppCandidates
@@ -1438,6 +1517,29 @@ class UiAutomationOrchestrator(
         }.toString()
     }
 
+    private fun plannerActions(element: UiElement): Set<String> =
+        if (element.standardActions.isNotEmpty()) {
+            element.standardActions
+        } else {
+            buildSet {
+                if (element.clickable || element.checkable) add("click")
+                if (element.longClickable) add("long_click")
+                if (element.editable) add("set_text")
+                if (element.scrollable) {
+                    add("scroll_forward")
+                    add("scroll_backward")
+                }
+                if (element.focusable) add("focus")
+            }
+        }
+
+    private fun plannerRange(range: UiRange): JsonObject = JsonObject().apply {
+        addProperty("type", range.type)
+        addProperty("min", range.min)
+        addProperty("max", range.max)
+        addProperty("current", range.current)
+    }
+
     private fun plannerElementLimit(): Int =
         if (isCompactLocalPlanner()) MAX_LOCAL_PROMPT_ELEMENTS else MAX_PROMPT_ELEMENTS
 
@@ -1503,6 +1605,11 @@ class UiAutomationOrchestrator(
         val target = when (action) {
             is UiActionStep.Tap -> action.target
             is UiActionStep.LongPress -> action.target
+            is UiActionStep.NodeAction -> action.target.takeIf {
+                action.action in setOf("click", "long_click", "context_click", "press_and_hold", "ime_enter")
+            } ?: return false
+            is UiActionStep.CustomAction -> action.target
+            is UiActionStep.Gesture -> action.target
             else -> return false
         }
         val element = target.elementId?.let(screen::element)
@@ -1581,6 +1688,9 @@ class UiAutomationOrchestrator(
     private fun actionLabel(action: UiActionStep): String = when (action) {
         is UiActionStep.Tap -> "tap"
         is UiActionStep.Focus -> "focus"
+        is UiActionStep.NodeAction -> action.action.replace('_', ' ')
+        is UiActionStep.CustomAction -> "custom action ${action.actionRef}"
+        is UiActionStep.Gesture -> action.gesture.replace('_', ' ')
         is UiActionStep.LongPress -> "long press"
         is UiActionStep.TypeText -> "type text"
         UiActionStep.PressBack -> "press back"
@@ -1589,6 +1699,7 @@ class UiAutomationOrchestrator(
         UiActionStep.PressRecents -> "press recents"
         UiActionStep.OpenNotifications -> "open notifications"
         UiActionStep.OpenQuickSettings -> "open quick settings"
+        is UiActionStep.GlobalAction -> action.action.replace('_', ' ')
         is UiActionStep.Wait -> "wait"
         is UiActionStep.Assert -> "assert"
         is UiActionStep.AskUser -> "ask user"
@@ -1601,7 +1712,69 @@ class UiAutomationOrchestrator(
         is UiActionStep.ShareCapturedMedia -> "share captured media"
     }
 
+    private fun actionFamily(action: UiActionStep): String = when (action) {
+        is UiActionStep.NodeAction, is UiActionStep.Focus -> "semantic_node"
+        is UiActionStep.CustomAction -> "custom_accessibility_action"
+        is UiActionStep.Gesture -> "gesture"
+        is UiActionStep.Tap, is UiActionStep.LongPress, is UiActionStep.TypeText, is UiActionStep.Scroll -> "ui_action"
+        is UiActionStep.GlobalAction,
+        UiActionStep.PressBack,
+        UiActionStep.PressHome,
+        UiActionStep.PressRecents,
+        UiActionStep.OpenNotifications,
+        UiActionStep.OpenQuickSettings -> "global_action"
+        is UiActionStep.OpenApp,
+        is UiActionStep.OpenSettingsPage,
+        is UiActionStep.OpenUrl,
+        is UiActionStep.ShareText,
+        is UiActionStep.OpenCamera,
+        is UiActionStep.ShareCapturedMedia -> "typed_android"
+        is UiActionStep.Wait, is UiActionStep.Assert, is UiActionStep.AskUser, is UiActionStep.Done -> "internal"
+    }
+
+    private fun executionMechanism(action: UiActionStep, result: ToolResult?): String {
+        result?.let { toolResult ->
+            runCatching { JSONObject(toolResult.output).optString("mechanism") }
+                .getOrNull()
+                ?.takeIf(String::isNotBlank)
+                ?.let { return it }
+        }
+        return when (action) {
+            is UiActionStep.Gesture -> "gesture"
+            is UiActionStep.CustomAction -> "custom_accessibility_action"
+            is UiActionStep.NodeAction, is UiActionStep.Focus -> "semantic_node"
+            is UiActionStep.GlobalAction,
+            UiActionStep.PressBack,
+            UiActionStep.PressHome,
+            UiActionStep.PressRecents,
+            UiActionStep.OpenNotifications,
+            UiActionStep.OpenQuickSettings -> "global_action"
+            is UiActionStep.OpenApp,
+            is UiActionStep.OpenSettingsPage,
+            is UiActionStep.OpenUrl,
+            is UiActionStep.ShareText,
+            is UiActionStep.OpenCamera,
+            is UiActionStep.ShareCapturedMedia -> "trusted_intent"
+            else -> "accessibility"
+        }
+    }
+
     private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
+
+    private fun markPhysicalActionDispatch(action: UiActionStep): Long {
+        val now = monotonicNowMs()
+        val fields = linkedMapOf<String, Any?>(
+            "action" to actionLabel(action),
+            "elapsed_ms" to (now - invocationStartedMonotonicMs).coerceAtLeast(0L)
+        )
+        if (!firstPhysicalActionRecorded) {
+            firstPhysicalActionRecorded = true
+            fields["invocation_to_first_action_ms"] =
+                (now - invocationStartedMonotonicMs).coerceAtLeast(0L)
+        }
+        trace("action_dispatch_started", fields)
+        return now
+    }
 
     companion object {
         const val CONTROL_UI_TOOL = "control_ui"
@@ -1613,6 +1786,9 @@ class UiAutomationOrchestrator(
         private const val INITIAL_OBSERVATION_TIMEOUT_MS = 1_500L
         private const val INITIAL_EVENT_WAIT_SLICE_MS = 250L
         private const val INITIAL_RETRY_DELAY_MS = 40L
+        private val PLANNER_OPERATION_TOKENS = Operation.entries.map { it.name.lowercase() }
+        private val PLANNER_OPERATION_SCHEMA = PLANNER_OPERATION_TOKENS.joinToString(",", "[", "]") { "\"$it\"" }
+        private val PLANNER_OPERATION_PROMPT = PLANNER_OPERATION_TOKENS.joinToString(", ")
 
         private val UI_DECISION_TOOLS = listOf(
             LlmToolDefinition(
@@ -1622,7 +1798,7 @@ class UiAutomationOrchestrator(
                     {
                       "type":"object",
                       "properties":{
-                        "op":{"type":"string","enum":["tap","long_press","type_text","scroll","press_back","press_home","press_recents","open_notifications","open_quick_settings","open_app","open_settings_page","open_url","open_camera","wait","share_text","share_captured_media"]},
+                        "op":{"type":"string","enum":$PLANNER_OPERATION_SCHEMA},
                         "target":{"type":"string","description":"A supplied pN target ID; required for tap, long_press, and type_text."},
                         "expect":{"type":"string","enum":["surface_change","mutation","content_appear","no_change"]},
                         "text":{"type":"string"},
@@ -1635,6 +1811,30 @@ class UiAutomationOrchestrator(
                         "ms":{"type":"integer"},
                         "target_package":{"type":"string"},
                         "expected_destination":{"type":"string"}
+                        ,"action":{"type":"string","description":"For node_action, one action token advertised on the target."}
+                        ,"action_ref":{"type":"string","pattern":"^ca[0-9]+$","description":"For custom_action, one ref advertised on the target."}
+                        ,"value":{"type":"number"}
+                        ,"selection_start":{"type":"integer"}
+                        ,"selection_end":{"type":"integer"}
+                        ,"row":{"type":"integer"}
+                        ,"column":{"type":"integer"}
+                        ,"granularity":{"type":"string"}
+                        ,"extend_selection":{"type":"boolean"}
+                        ,"x":{"type":"integer"}
+                        ,"y":{"type":"integer"}
+                        ,"duration_ms":{"type":"integer"}
+                        ,"global_action":{"type":"string","description":"For global_action, one token from current system_actions."}
+                        ,"gesture":{"type":"string","enum":["tap_point","double_tap","long_press_point","press_and_hold","swipe_path","drag_drop","polyline_drag","pinch_in","pinch_out","two_finger_swipe"]}
+                        ,"destination_target":{"type":"string","description":"A supplied pN destination for drag_drop."}
+                        ,"start_x":{"type":"number","minimum":0,"maximum":1}
+                        ,"start_y":{"type":"number","minimum":0,"maximum":1}
+                        ,"end_x":{"type":"number","minimum":0,"maximum":1}
+                        ,"end_y":{"type":"number","minimum":0,"maximum":1}
+                        ,"center_x":{"type":"number","minimum":0,"maximum":1}
+                        ,"center_y":{"type":"number","minimum":0,"maximum":1}
+                        ,"points":{"type":"string","description":"At most 8 normalized x,y pairs separated by semicolons."}
+                        ,"html_element":{"type":"string"}
+                        ,"scroll_amount":{"type":"number","exclusiveMinimum":0}
                       },
                       "required":["op"],
                       "additionalProperties":false
@@ -1660,9 +1860,11 @@ class UiAutomationOrchestrator(
             Finish: {"v":3,"kind":"finish","outcome":"The requested state is verified."}
             Put action inputs in "args", for example:
             {"v":3,"kind":"act","op":"type_text","target":"p1","args":{"text":"hello"},"expect":"mutation"}
-            Allowed ops: tap, long_press, type_text, scroll, press_back, press_home, press_recents,
-            open_notifications, open_quick_settings, open_app, open_settings_page, open_url,
-            open_camera, wait, share_text, share_captured_media.
+            Allowed ops: $PLANNER_OPERATION_PROMPT.
+            For node_action, supply args.action using only an action advertised on that target.
+            For custom_action, supply args.action_ref using only a caN ref advertised on that target.
+            For global_action, supply args.global_action using only a token in current system_actions.
+            Gesture mechanics are one bounded operation owned by Kotlin; never split pointer down/move/up across turns.
             Required args: scroll direction; open_app package_name; open_settings_page page and optional package_name;
             open_url url; open_camera mode and facing; wait ms; share_text text and optional target_package/expected_destination;
             share_captured_media target_package and expected_destination.
@@ -1678,9 +1880,10 @@ class UiAutomationOrchestrator(
             {"v":3,"kind":"act","op":"type_text","target":"p1","args":{"text":"hello"},"expect":"mutation"}
             {"v":3,"kind":"act","op":"scroll","target":"p2","args":{"direction":"down"},"expect":"mutation"}
             {"v":3,"kind":"act","op":"open_app","args":{"package_name":"com.example"},"expect":"surface_change"}
-            Allowed ops: tap, long_press, type_text, scroll, press_back, press_home, press_recents,
-            open_notifications, open_quick_settings, open_app, open_settings_page, open_url,
-            open_camera, wait, share_text, share_captured_media.
+            Allowed ops: $PLANNER_OPERATION_PROMPT.
+            Prefer node_action with an action advertised on the target; use custom_action only with that target's advertised caN ref.
+            Use global_action only with a token in current system_actions.
+            Use gesture only when semantic node/global actions are unavailable; gesture coordinates must be normalized.
             Required args: scroll direction; open_app package_name; open_settings_page page and optional package_name;
             open_url url; open_camera mode and facing; wait ms; share_text text and optional target_package/expected_destination;
             share_captured_media target_package and expected_destination.
@@ -1695,6 +1898,9 @@ class UiAutomationOrchestrator(
     private fun getTargetElementId(action: UiActionStep): String? = when(action) {
         is UiActionStep.Tap -> action.target.elementId
         is UiActionStep.Focus -> action.target.elementId
+        is UiActionStep.NodeAction -> action.target.elementId
+        is UiActionStep.CustomAction -> action.target.elementId
+        is UiActionStep.Gesture -> action.target.elementId
         is UiActionStep.LongPress -> action.target.elementId
         is UiActionStep.TypeText -> action.target?.elementId
         is UiActionStep.Scroll -> action.target?.elementId
@@ -1709,6 +1915,7 @@ class UiAutomationOrchestrator(
         is UiActionStep.PressRecents,
         is UiActionStep.OpenNotifications,
         is UiActionStep.OpenQuickSettings,
+        is UiActionStep.GlobalAction,
         is UiActionStep.Wait,
         is UiActionStep.AskUser,
         is UiActionStep.Done,

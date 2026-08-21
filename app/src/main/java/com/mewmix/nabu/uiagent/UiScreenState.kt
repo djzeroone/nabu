@@ -32,14 +32,54 @@ data class UiElement(
     val hintText: String? = null,
     val focusable: Boolean = false,
     val focused: Boolean = false,
-    val selected: Boolean = false
+    val selected: Boolean = false,
+    val standardActions: Set<String> = emptySet(),
+    val customActions: List<UiCustomActionRef> = emptyList(),
+    val movementGranularities: Int = 0,
+    val range: UiRange? = null,
+    val accessibilityFocused: Boolean = false,
+    val contextClickable: Boolean = false,
+    val selectionStart: Int = -1,
+    val selectionEnd: Int = -1,
+    val collection: UiCollection? = null,
+    val collectionItem: UiCollectionItem? = null
+)
+
+data class UiCustomActionRef(
+    val ref: String,
+    val label: String,
+    internal val trustedActionId: Int
+)
+
+data class UiRange(
+    val type: Int,
+    val min: Float,
+    val max: Float,
+    val current: Float
+)
+
+data class UiCollection(
+    val rowCount: Int,
+    val columnCount: Int,
+    val hierarchical: Boolean,
+    val selectionMode: Int
+)
+
+data class UiCollectionItem(
+    val rowIndex: Int,
+    val rowSpan: Int,
+    val columnIndex: Int,
+    val columnSpan: Int,
+    val heading: Boolean,
+    val selected: Boolean
 )
 
 data class UiScreenState(
     val screenId: String,
     val packageName: String?,
     val activityName: String?,
-    val elements: List<UiElement>
+    val elements: List<UiElement>,
+    val systemActions: Set<String> = emptySet()
 ) {
     fun element(id: String): UiElement? {
         val plannerIndex = id.trim().lowercase().removePrefix("p").toIntOrNull()
@@ -54,7 +94,10 @@ data class UiScreenState(
 
     fun plannerElements(limit: Int = 100): List<UiElement> = elements.asSequence()
         .filter { it.visible }
-        .filter { it.clickable || it.editable || it.scrollable || it.checkable || it.longClickable }
+        .filter {
+            it.standardActions.isNotEmpty() || it.customActions.isNotEmpty() ||
+                it.clickable || it.editable || it.scrollable || it.checkable || it.longClickable
+        }
         .take(limit)
         .toList()
 

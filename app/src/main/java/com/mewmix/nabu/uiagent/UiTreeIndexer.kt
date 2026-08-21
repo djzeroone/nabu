@@ -53,7 +53,30 @@ object UiTreeIndexer {
                 hintText = null,
                 focusable = node.isFocusable,
                 focused = node.isFocused,
-                selected = node.isSelected
+                selected = node.isSelected,
+                standardActions = node.standardActions.mapTo(linkedSetOf()) { it.token },
+                customActions = node.customActions.mapIndexed { index, action ->
+                    UiCustomActionRef("ca$index", action.label, action.actionId)
+                },
+                movementGranularities = node.movementGranularities,
+                range = node.rangeInfo?.let { UiRange(it.type, it.min, it.max, it.current) },
+                accessibilityFocused = node.isAccessibilityFocused,
+                contextClickable = node.isContextClickable,
+                selectionStart = node.textSelectionStart,
+                selectionEnd = node.textSelectionEnd,
+                collection = node.collectionInfo?.let {
+                    UiCollection(it.rowCount, it.columnCount, it.hierarchical, it.selectionMode)
+                },
+                collectionItem = node.collectionItemInfo?.let {
+                    UiCollectionItem(
+                        it.rowIndex,
+                        it.rowSpan,
+                        it.columnIndex,
+                        it.columnSpan,
+                        it.heading,
+                        it.selected
+                    )
+                }
             )
             for (child in node.children) {
                 visit(child, id)
@@ -68,11 +91,14 @@ object UiTreeIndexer {
                 resolvedPackage,
                 "", // activityName
                 indexed.joinToString("|") {
-                    "${it.id}:${it.enabled}:${it.visible}:${it.checked}:${it.text.orEmpty()}"
+                    "${it.id}:${it.enabled}:${it.visible}:${it.checked}:${it.focused}:${it.selected}:" +
+                        "${it.text.orEmpty()}:${it.standardActions.sorted()}:" +
+                        "${it.customActions.map { action -> action.ref + ':' + action.label }}:${it.range}:" +
+                        "${it.accessibilityFocused}:${it.selectionStart}:${it.selectionEnd}:${it.collection}:${it.collectionItem}"
                 }
             ).joinToString("\u001f")
         )
-        return UiScreenState(screenId, resolvedPackage, null, indexed)
+        return UiScreenState(screenId, resolvedPackage, null, indexed, snapshot.systemActions)
     }
 
     fun parse(

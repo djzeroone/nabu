@@ -301,4 +301,68 @@ class UiActionValidatorTest {
         assertEquals(unchecked.elements.single().id, checked.elements.single().id)
         assertTrue(unchecked.screenId != checked.screenId)
     }
+
+    @Test
+    fun consequentialGestureCannotBypassTargetConfirmation() {
+        val send = screen.elements.first { it.text == "Send" }
+        val plan = UiActionPlan(
+            "Send the message",
+            screen.screenId,
+            listOf(UiActionStep.Gesture("tap_point", UiTarget(send.id, send.bounds)))
+        )
+
+        assertTrue(UiActionValidator.validate(plan, screen) is UiPlanDecision.RequireConfirmation)
+    }
+
+    @Test
+    fun nodeActionMustBeAdvertisedAndProgressMustBeInRange() {
+        val base = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val slider = base.copy(
+            standardActions = setOf("set_progress"),
+            range = UiRange(0, 0f, 100f, 25f)
+        )
+        val capabilityScreen = screen.copy(elements = screen.elements.map { if (it.id == base.id) slider else it })
+        val allowed = UiActionPlan(
+            "Set slider",
+            capabilityScreen.screenId,
+            listOf(
+                UiActionStep.NodeAction(
+                    "set_progress",
+                    UiTarget(slider.id, slider.bounds),
+                    mapOf("value" to "42")
+                )
+            )
+        )
+        val outOfRange = allowed.copy(
+            steps = listOf(
+                UiActionStep.NodeAction(
+                    "set_progress",
+                    UiTarget(slider.id, slider.bounds),
+                    mapOf("value" to "142")
+                )
+            )
+        )
+
+        assertEquals(UiPlanDecision.Allow, UiActionValidator.validate(allowed, capabilityScreen))
+        assertTrue(UiActionValidator.validate(outOfRange, capabilityScreen) is UiPlanDecision.Invalid)
+    }
+
+    @Test
+    fun dangerousCustomActionLabelRequiresConfirmation() {
+        val base = screen.elements.first { it.resourceId == "android:id/switch_widget" }
+        val target = base.copy(
+            text = null,
+            contentDescription = null,
+            resourceId = "fixture:id/item",
+            customActions = listOf(UiCustomActionRef("ca0", "Delete", 0x01000001))
+        )
+        val customScreen = screen.copy(elements = screen.elements.map { if (it.id == base.id) target else it })
+        val plan = UiActionPlan(
+            "Use the available action",
+            customScreen.screenId,
+            listOf(UiActionStep.CustomAction("ca0", UiTarget(target.id, target.bounds)))
+        )
+
+        assertTrue(UiActionValidator.validate(plan, customScreen) is UiPlanDecision.RequireConfirmation)
+    }
 }

@@ -20,7 +20,10 @@ object AccessibilityToolHandler {
         "ui_set_text",
         "ui_scroll",
         "ui_global_action",
-        "ui_focus"
+        "ui_focus",
+        "ui_node_action",
+        "ui_custom_action",
+        "ui_gesture"
     )
 
     fun isEnabled(): Boolean {
@@ -128,7 +131,8 @@ object AccessibilityToolHandler {
                     ToolResult(call.toolName, "XML file not found at $path.", true)
                 }
             }
-            "ui_tap", "ui_long_press", "ui_set_text", "ui_scroll", "ui_global_action", "ui_focus" -> {
+            "ui_tap", "ui_long_press", "ui_set_text", "ui_scroll", "ui_global_action", "ui_focus",
+            "ui_node_action", "ui_custom_action", "ui_gesture" -> {
                 try {
                     val params = JSONObject(call.arguments)
                     val result = service.performUiAction(call.toolName, params)

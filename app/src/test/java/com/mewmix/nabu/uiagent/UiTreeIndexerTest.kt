@@ -1,5 +1,11 @@
 package com.mewmix.nabu.uiagent
 
+import android.graphics.Rect
+import com.mewmix.nabu.accessibility.SnapshotCustomAction
+import com.mewmix.nabu.accessibility.SnapshotNodeAction
+import com.mewmix.nabu.accessibility.UiNode
+import com.mewmix.nabu.accessibility.UiRangeInfo
+import com.mewmix.nabu.accessibility.UiSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -51,5 +57,50 @@ class UiTreeIndexerTest {
         val result = runCatching { UiTreeIndexer.parse(unsafe) }
 
         assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun `snapshot projection preserves standard custom and range capabilities`() {
+        val node = UiNode(
+            treePath = "0",
+            packageName = "p",
+            resourceId = "slider",
+            className = "android.widget.SeekBar",
+            text = "Brightness",
+            contentDescription = "",
+            isCheckable = false,
+            isChecked = false,
+            isClickable = false,
+            isEnabled = true,
+            isEditable = false,
+            isFocusable = true,
+            isFocused = false,
+            isVisibleToUser = true,
+            isScrollable = false,
+            isLongClickable = false,
+            isPassword = false,
+            isSelected = false,
+            boundsInScreen = Rect(0, 0, 100, 20),
+            children = emptyList(),
+            standardActions = listOf(SnapshotNodeAction(1, "set_progress", null)),
+            customActions = listOf(SnapshotCustomAction(0x01000001, "Reset")),
+            rangeInfo = UiRangeInfo(0, 0f, 100f, 42f)
+        )
+        val snapshot = UiSnapshot(
+            id = "observation",
+            capturedAtMs = 1L,
+            packageName = "p",
+            windowTitle = "fixture",
+            rotation = 0,
+            displayBounds = Rect(0, 0, 100, 200),
+            rootNode = node
+        )
+
+        val element = UiTreeIndexer.build(snapshot).elements.single()
+
+        assertEquals(setOf("set_progress"), element.standardActions)
+        assertEquals("ca0", element.customActions.single().ref)
+        assertEquals("Reset", element.customActions.single().label)
+        assertEquals(42f, element.range?.current)
     }
 }

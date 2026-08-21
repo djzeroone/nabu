@@ -2,6 +2,7 @@ package com.mewmix.nabu.uiagent
 
 import android.content.Context
 import android.content.pm.PackageManager
+import com.mewmix.nabu.accessibility.GlobalSystemAction
 
 sealed interface IntentPolicyDecision {
     data object Allow : IntentPolicyDecision
@@ -23,6 +24,17 @@ object AutomationIntentPolicy {
         }
         
         return when (action) {
+            is UiActionStep.GlobalAction -> {
+                val global = GlobalSystemAction.fromToken(action.action)
+                    ?: return IntentPolicyDecision.Block("Unknown global system action.")
+                when {
+                    policyContext.isScheduled && !global.scheduledAllowed ->
+                        IntentPolicyDecision.Block("Global action '${global.token}' is not allowed while scheduled.")
+                    global == GlobalSystemAction.LOCK_SCREEN || global == GlobalSystemAction.POWER_DIALOG ->
+                        IntentPolicyDecision.RequireConfirmation("System action ${global.token}", null)
+                    else -> IntentPolicyDecision.Allow
+                }
+            }
             is UiActionStep.OpenApp -> evaluateOpenApp(action, policyContext)
             is UiActionStep.OpenSettingsPage -> evaluateOpenSettings(action, policyContext)
             is UiActionStep.OpenUrl -> evaluateOpenUrl(action, policyContext)

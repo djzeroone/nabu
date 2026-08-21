@@ -105,8 +105,12 @@ internal object UiTransitionPolicy {
         UiActionStep.PressRecents,
         UiActionStep.OpenNotifications,
         UiActionStep.OpenQuickSettings -> budget.maxUiTransitionWaitMs
+        is UiActionStep.GlobalAction -> budget.maxUiTransitionWaitMs
         is UiActionStep.Tap,
         is UiActionStep.Focus,
+        is UiActionStep.NodeAction,
+        is UiActionStep.CustomAction,
+        is UiActionStep.Gesture,
         is UiActionStep.LongPress,
         is UiActionStep.TypeText,
         is UiActionStep.Scroll -> budget.maxInAppTransitionWaitMs

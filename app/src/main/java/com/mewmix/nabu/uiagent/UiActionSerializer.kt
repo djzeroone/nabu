@@ -14,6 +14,32 @@ fun UiActionStep.toJson(): JsonObject {
             obj.addProperty("action", "focus")
             obj.add("target", this.target.toJson())
         }
+        is UiActionStep.NodeAction -> {
+            obj.addProperty("action", "node_action")
+            obj.addProperty("node_action", this.action)
+            obj.add("target", this.target.toJson())
+            if (arguments.isNotEmpty()) {
+                obj.add("arguments", JsonObject().apply {
+                    arguments.forEach { (key, value) -> addProperty(key, value) }
+                })
+            }
+        }
+        is UiActionStep.CustomAction -> {
+            obj.addProperty("action", "custom_action")
+            obj.addProperty("action_ref", this.actionRef)
+            obj.add("target", this.target.toJson())
+        }
+        is UiActionStep.Gesture -> {
+            obj.addProperty("action", "gesture")
+            obj.addProperty("gesture", this.gesture)
+            obj.add("target", this.target.toJson())
+            this.destination?.let { obj.add("destination", it.toJson()) }
+            if (arguments.isNotEmpty()) {
+                obj.add("arguments", JsonObject().apply {
+                    arguments.forEach { (key, value) -> addProperty(key, value) }
+                })
+            }
+        }
         is UiActionStep.LongPress -> {
             obj.addProperty("action", "long_press")
             obj.add("target", this.target.toJson())
@@ -28,6 +54,10 @@ fun UiActionStep.toJson(): JsonObject {
         UiActionStep.PressRecents -> obj.addProperty("action", "press_recents")
         UiActionStep.OpenNotifications -> obj.addProperty("action", "open_notifications")
         UiActionStep.OpenQuickSettings -> obj.addProperty("action", "open_quick_settings")
+        is UiActionStep.GlobalAction -> {
+            obj.addProperty("action", "global_action")
+            obj.addProperty("global_action", this.action)
+        }
         is UiActionStep.Scroll -> {
             obj.addProperty("action", "scroll")
             obj.addProperty("direction", this.direction.name)

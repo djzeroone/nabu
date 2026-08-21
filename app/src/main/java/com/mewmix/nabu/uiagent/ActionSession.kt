@@ -66,7 +66,13 @@ data class ActionStepRecord(
     val latencyMs: Long,
     val retryCount: Int = 0,
     val sourcePackage: String? = null,
-    val resultPackage: String? = null
+    val resultPackage: String? = null,
+    val actionFamily: String? = null,
+    val semanticAction: String? = null,
+    val executionMechanism: String? = null,
+    val verificationStatus: String? = null,
+    val sourceWindow: String? = null,
+    val resultWindow: String? = null
 )
 
 data class ActionConversationTurn(

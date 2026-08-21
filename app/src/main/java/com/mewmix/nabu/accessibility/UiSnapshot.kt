@@ -26,7 +26,40 @@ data class UiNode(
     val isPassword: Boolean,
     val isSelected: Boolean,
     val boundsInScreen: Rect,
-    val children: List<UiNode>
+    val children: List<UiNode>,
+    val standardActions: List<SnapshotNodeAction> = emptyList(),
+    val customActions: List<SnapshotCustomAction> = emptyList(),
+    val movementGranularities: Int = 0,
+    val rangeInfo: UiRangeInfo? = null,
+    val isAccessibilityFocused: Boolean = false,
+    val isContextClickable: Boolean = false,
+    val textSelectionStart: Int = -1,
+    val textSelectionEnd: Int = -1,
+    val collectionInfo: UiCollectionInfo? = null,
+    val collectionItemInfo: UiCollectionItemInfo? = null
+)
+
+data class UiRangeInfo(
+    val type: Int,
+    val min: Float,
+    val max: Float,
+    val current: Float
+)
+
+data class UiCollectionInfo(
+    val rowCount: Int,
+    val columnCount: Int,
+    val hierarchical: Boolean,
+    val selectionMode: Int
+)
+
+data class UiCollectionItemInfo(
+    val rowIndex: Int,
+    val rowSpan: Int,
+    val columnIndex: Int,
+    val columnSpan: Int,
+    val heading: Boolean,
+    val selected: Boolean
 )
 
 /**
@@ -41,11 +74,14 @@ data class UiSnapshot(
     val rotation: Int,
     val displayBounds: Rect,
     val rootNode: UiNode?,
+    val windowId: Int = -1,
+    val systemActions: Set<String> = emptySet(),
     val stateFingerprint: String = UiSnapshotFingerprint.compute(
         packageName = packageName,
         windowTitle = windowTitle,
         rotation = rotation,
-        rootNode = rootNode
+        rootNode = rootNode,
+        systemActions = systemActions
     )
 )
 
@@ -59,7 +95,8 @@ object UiSnapshotFingerprint {
         packageName: String,
         windowTitle: String,
         rotation: Int,
-        rootNode: UiNode?
+        rootNode: UiNode?,
+        systemActions: Set<String> = emptySet()
     ): String {
         var hash = FNV_OFFSET_BASIS
 
@@ -93,6 +130,40 @@ object UiSnapshotFingerprint {
             add(node.isLongClickable)
             add(node.isPassword)
             add(node.isSelected)
+            node.standardActions.sortedBy { it.actionId }.forEach { action ->
+                add(action.actionId.toString())
+                add(action.token)
+                add(action.label.orEmpty())
+            }
+            node.customActions.sortedBy { it.actionId }.forEach { action ->
+                add(action.actionId.toString())
+                add(action.label)
+            }
+            add(node.movementGranularities.toString())
+            add(node.isAccessibilityFocused)
+            add(node.isContextClickable)
+            add(node.textSelectionStart.toString())
+            add(node.textSelectionEnd.toString())
+            node.rangeInfo?.let { range ->
+                add(range.type.toString())
+                add(range.min.toString())
+                add(range.max.toString())
+                add(range.current.toString())
+            }
+            node.collectionInfo?.let { collection ->
+                add(collection.rowCount.toString())
+                add(collection.columnCount.toString())
+                add(collection.hierarchical)
+                add(collection.selectionMode.toString())
+            }
+            node.collectionItemInfo?.let { item ->
+                add(item.rowIndex.toString())
+                add(item.rowSpan.toString())
+                add(item.columnIndex.toString())
+                add(item.columnSpan.toString())
+                add(item.heading)
+                add(item.selected)
+            }
             add(node.boundsInScreen.left.toString())
             add(node.boundsInScreen.top.toString())
             add(node.boundsInScreen.right.toString())
@@ -103,6 +174,7 @@ object UiSnapshotFingerprint {
         add(packageName)
         add(windowTitle)
         add(rotation.toString())
+        systemActions.sorted().forEach(::add)
         rootNode?.let(::visit)
         return java.lang.Long.toUnsignedString(hash, 16)
     }

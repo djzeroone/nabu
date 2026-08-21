@@ -19,7 +19,11 @@ enum class Operation {
     WAIT,
     SHARE_TEXT,
     SHARE_CAPTURED_MEDIA,
-    FOCUS
+    FOCUS,
+    NODE_ACTION,
+    CUSTOM_ACTION,
+    GLOBAL_ACTION,
+    GESTURE
 }
 
 enum class ExpectedEffect {
@@ -101,6 +105,22 @@ sealed interface AgentDecision {
                         expectedDestination = arguments["expected_destination"] ?: ""
                     )
                     Operation.FOCUS -> UiActionStep.Focus(uiTarget ?: UiTarget(null, null))
+                    Operation.NODE_ACTION -> UiActionStep.NodeAction(
+                        action = arguments["action"] ?: "",
+                        target = uiTarget ?: UiTarget(null, null),
+                        arguments = arguments - "action"
+                    )
+                    Operation.CUSTOM_ACTION -> UiActionStep.CustomAction(
+                        actionRef = arguments["action_ref"] ?: "",
+                        target = uiTarget ?: UiTarget(null, null)
+                    )
+                    Operation.GLOBAL_ACTION -> UiActionStep.GlobalAction(arguments["global_action"] ?: "")
+                    Operation.GESTURE -> UiActionStep.Gesture(
+                        gesture = arguments["gesture"] ?: "",
+                        target = uiTarget ?: UiTarget(null, null),
+                        destination = arguments["destination_target"]?.let { UiTarget(it, null) },
+                        arguments = arguments - setOf("gesture", "destination_target")
+                    )
                 }
             }
             is Query -> UiActionStep.Done("Query not directly supported in UiActionPlan execution.")

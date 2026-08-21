@@ -100,6 +100,9 @@ class GoalExecutor(
             is UiActionStep.TypeText -> this.target
             is UiActionStep.Scroll -> this.target
             is UiActionStep.Focus -> this.target
+            is UiActionStep.NodeAction -> this.target
+            is UiActionStep.CustomAction -> this.target
+            is UiActionStep.Gesture -> this.target
             else -> null
         }
         
@@ -123,6 +126,28 @@ class GoalExecutor(
         
         return when (this) {
             is UiActionStep.Focus -> ToolCall("ui_focus", args())
+            is UiActionStep.NodeAction -> ToolCall(
+                "ui_node_action",
+                args(*((arguments + ("node_action" to action)).map { it.key to it.value }.toTypedArray()))
+            )
+            is UiActionStep.CustomAction -> {
+                val custom = element?.customActions?.singleOrNull { it.ref == actionRef }
+                ToolCall(
+                    "ui_custom_action",
+                    args(
+                        "trusted_action_id" to (custom?.trustedActionId ?: Int.MIN_VALUE),
+                        "custom_action_label" to (custom?.label ?: "")
+                    )
+                )
+            }
+            is UiActionStep.Gesture -> {
+                val gestureArgs = arguments.toMutableMap<String, Any>()
+                gestureArgs["gesture"] = gesture
+                destination?.elementId?.let { destinationId ->
+                    screen?.element(destinationId)?.bounds?.let { gestureArgs["destination_bounds"] = it.toList() }
+                }
+                ToolCall("ui_gesture", args(*gestureArgs.map { it.key to it.value }.toTypedArray()))
+            }
             is UiActionStep.Tap -> ToolCall("ui_tap", args())
             is UiActionStep.LongPress -> ToolCall("ui_long_press", args())
             is UiActionStep.TypeText -> ToolCall("ui_set_text", args("text" to text))
@@ -130,6 +155,10 @@ class GoalExecutor(
             is UiActionStep.Wait -> ToolCall("wait", mapOf("duration_ms" to milliseconds.toString()))
             is UiActionStep.PressHome -> ToolCall("ui_global_action", mapOf("observation_id" to observationId, "global_action" to "home"))
             is UiActionStep.PressBack -> ToolCall("ui_global_action", mapOf("observation_id" to observationId, "global_action" to "back"))
+            is UiActionStep.GlobalAction -> ToolCall(
+                "ui_global_action",
+                mapOf("observation_id" to observationId, "global_action" to action)
+            )
             else -> ToolCall("unknown", emptyMap())
         }
     }

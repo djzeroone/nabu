@@ -1,5 +1,8 @@
 package com.mewmix.nabu.uiagent
 
+import com.mewmix.nabu.accessibility.BoundedGestureCatalog
+import com.mewmix.nabu.accessibility.StandardNodeAction
+
 sealed interface UiPlanDecision {
     data object Allow : UiPlanDecision
     data class RequireConfirmation(val reason: String) : UiPlanDecision
@@ -43,6 +46,9 @@ object UiActionValidator {
             ?: validateCapability(step.target, screen, "clickable") { it.clickable || it.checkable }
         is UiActionStep.Focus -> validateTarget(step.target, screen, requireEnabled = true)?.let { it }
             ?: validateCapability(step.target, screen, "focusable") { it.focusable || it.clickable || it.checkable }
+        is UiActionStep.NodeAction -> validateNodeAction(step, screen)
+        is UiActionStep.CustomAction -> validateCustomAction(step, screen)
+        is UiActionStep.Gesture -> validateGesture(step, screen)
         is UiActionStep.LongPress -> validateTarget(step.target, screen, requireEnabled = true)?.let { it }
             ?: validateCapability(step.target, screen, "long-clickable") { it.longClickable }
         is UiActionStep.TypeText -> {
@@ -74,12 +80,81 @@ object UiActionValidator {
         is UiActionStep.AskUser -> if (step.reason.isBlank()) UiPlanDecision.Invalid("ask_user requires a reason.") else null
         is UiActionStep.Done -> if (step.summary.isBlank()) UiPlanDecision.Invalid("done requires a summary.") else null
         UiActionStep.PressBack, UiActionStep.PressHome, UiActionStep.PressRecents, UiActionStep.OpenNotifications, UiActionStep.OpenQuickSettings -> null
+        is UiActionStep.GlobalAction -> if (step.action !in screen.systemActions) {
+            UiPlanDecision.Invalid("Global action '${step.action}' is unavailable in the current observation.")
+        } else null
         is UiActionStep.OpenApp,
         is UiActionStep.OpenSettingsPage,
         is UiActionStep.OpenUrl,
         is UiActionStep.ShareText,
         is UiActionStep.OpenCamera,
         is UiActionStep.ShareCapturedMedia -> null
+    }
+
+    private fun validateGesture(step: UiActionStep.Gesture, screen: UiScreenState): UiPlanDecision? {
+        validateTarget(step.target, screen, requireEnabled = true)?.let { return it }
+        step.destination?.let { validateTarget(it, screen, requireEnabled = true)?.let { decision -> return decision } }
+        if (step.gesture !in BoundedGestureCatalog.plannerTokens) {
+            return UiPlanDecision.Invalid("Unknown or unbounded gesture '${step.gesture}'.")
+        }
+        if (step.gesture == "drag_drop" && step.destination == null) {
+            return UiPlanDecision.Invalid("drag_drop requires an observed destination target.")
+        }
+        val coordinateKeys = listOf("start_x", "start_y", "end_x", "end_y", "center_x", "center_y")
+        coordinateKeys.forEach { key ->
+            step.arguments[key]?.toFloatOrNull()?.let { value ->
+                if (!value.isFinite() || value !in 0f..1f) {
+                    return UiPlanDecision.Invalid("Gesture coordinate '$key' must be normalized.")
+                }
+            }
+        }
+        val points = runCatching { BoundedGestureCatalog.parsePoints(step.arguments["points"].orEmpty()) }
+        if (points.isFailure) return UiPlanDecision.Invalid(points.exceptionOrNull()?.message ?: "Invalid gesture points.")
+        return null
+    }
+
+    private fun validateNodeAction(
+        step: UiActionStep.NodeAction,
+        screen: UiScreenState
+    ): UiPlanDecision? {
+        validateTarget(step.target, screen, requireEnabled = true)?.let { return it }
+        val element = step.target.elementId?.let(screen::element)
+            ?: return UiPlanDecision.Invalid("node_action requires a current target element.")
+        val token = step.action.trim().lowercase()
+        if (token !in element.standardActions) {
+            return UiPlanDecision.Invalid("Target element '${element.id}' does not advertise '$token'.")
+        }
+        if (element.password && token in setOf("copy", "cut", "paste", "set_text", "set_selection")) {
+            return UiPlanDecision.Block("Text and clipboard actions on password fields are blocked.")
+        }
+        val metadata = StandardNodeAction.entries.firstOrNull { it.token == token }
+            ?: return UiPlanDecision.Invalid("Unknown standard node action '$token'.")
+        metadata.requiredArguments.firstOrNull { step.arguments[it].isNullOrBlank() }?.let { missing ->
+            return UiPlanDecision.Invalid("$token requires '$missing'.")
+        }
+        if (token == "set_progress") {
+            val value = step.arguments["value"]?.toFloatOrNull()
+                ?: return UiPlanDecision.Invalid("set_progress requires a numeric value.")
+            val range = element.range
+                ?: return UiPlanDecision.Invalid("set_progress requires target RangeInfo.")
+            if (value !in range.min..range.max) {
+                return UiPlanDecision.Invalid("set_progress value is outside the target range.")
+            }
+        }
+        return null
+    }
+
+    private fun validateCustomAction(
+        step: UiActionStep.CustomAction,
+        screen: UiScreenState
+    ): UiPlanDecision? {
+        validateTarget(step.target, screen, requireEnabled = true)?.let { return it }
+        val element = step.target.elementId?.let(screen::element)
+            ?: return UiPlanDecision.Invalid("custom_action requires a current target element.")
+        if (element.customActions.none { it.ref == step.actionRef }) {
+            return UiPlanDecision.Invalid("Custom action ref is not advertised for this target observation.")
+        }
+        return null
     }
 
     private fun validateTarget(
@@ -131,33 +206,45 @@ object UiActionValidator {
     }
 
     private fun buildSafetyContext(plan: UiActionPlan, screen: UiScreenState): String {
-        val targetText = plan.steps.mapNotNull { step ->
-            val id = when (step) {
-                is UiActionStep.Tap -> step.target.elementId
-                is UiActionStep.LongPress -> step.target.elementId
-            is UiActionStep.TypeText -> step.target?.elementId
-                is UiActionStep.Scroll -> step.target?.elementId
-            is UiActionStep.Assert -> step.condition.elementId
-                else -> null
-            }
-            id?.let(screen::element)?.let { element ->
-                listOfNotNull(element.text, element.contentDescription, element.resourceId).joinToString(" ")
-            }
-        }
+        val targetText = plan.steps.mapNotNull { targetSafetyEvidence(it, screen) }
         return (listOf(plan.goal) + targetText).joinToString(" ")
     }
 
     private fun buildCommitBoundaryContext(plan: UiActionPlan, screen: UiScreenState): String =
         plan.steps.mapNotNull { step ->
-            val id = when (step) {
-                is UiActionStep.Tap -> step.target.elementId
-                is UiActionStep.LongPress -> step.target.elementId
-                else -> null
-            }
-            id?.let(screen::element)?.let { element ->
-                listOfNotNull(element.text, element.contentDescription, element.resourceId).joinToString(" ")
+            if (step is UiActionStep.TypeText || step is UiActionStep.Scroll || step is UiActionStep.Assert) {
+                null
+            } else {
+                targetSafetyEvidence(step, screen)
             }
         }.joinToString(" ")
+
+    private fun targetSafetyEvidence(step: UiActionStep, screen: UiScreenState): String? {
+        val id = when (step) {
+            is UiActionStep.Tap -> step.target.elementId
+            is UiActionStep.LongPress -> step.target.elementId
+            is UiActionStep.TypeText -> step.target?.elementId
+            is UiActionStep.Scroll -> step.target?.elementId
+            is UiActionStep.NodeAction -> step.target.elementId
+            is UiActionStep.CustomAction -> step.target.elementId
+            is UiActionStep.Gesture -> step.target.elementId
+            is UiActionStep.Assert -> step.condition.elementId
+            else -> null
+        }
+        val element = id?.let(screen::element) ?: return null
+        val actionEvidence = when (step) {
+            is UiActionStep.CustomAction -> element.customActions.singleOrNull { it.ref == step.actionRef }?.label
+            is UiActionStep.NodeAction -> step.action
+            is UiActionStep.Gesture -> step.gesture
+            else -> null
+        }
+        return listOfNotNull(
+            element.text,
+            element.contentDescription,
+            element.resourceId,
+            actionEvidence
+        ).joinToString(" ")
+    }
 }
 
 internal fun UiActionPlan.resolveElementReferences(screen: UiScreenState): UiActionPlan = copy(
@@ -167,6 +254,12 @@ internal fun UiActionPlan.resolveElementReferences(screen: UiScreenState): UiAct
             is UiActionStep.LongPress -> step.copy(target = step.target.resolve(screen))
             is UiActionStep.TypeText -> step.copy(target = step.target?.resolve(screen))
             is UiActionStep.Scroll -> step.copy(target = step.target?.resolve(screen))
+            is UiActionStep.NodeAction -> step.copy(target = step.target.resolve(screen))
+            is UiActionStep.CustomAction -> step.copy(target = step.target.resolve(screen))
+            is UiActionStep.Gesture -> step.copy(
+                target = step.target.resolve(screen),
+                destination = step.destination?.resolve(screen)
+            )
             is UiActionStep.Assert -> step.copy(
                 condition = step.condition.copy(
                     elementId = step.condition.elementId?.let { id -> screen.element(id)?.id ?: id }

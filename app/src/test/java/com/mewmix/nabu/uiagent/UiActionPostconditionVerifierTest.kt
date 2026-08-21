@@ -51,6 +51,40 @@ class UiActionPostconditionVerifierTest {
         assertEquals(PostconditionStatus.VERIFIED, result.status)
     }
 
+    @Test
+    fun verifiesSemanticFocusState() {
+        val before = screenWithInput("")
+        val source = before.elements.single().copy(focused = false)
+        val afterElement = source.copy(focused = true)
+
+        val result = UiActionPostconditionVerifier.verify(
+            UiActionStep.NodeAction("focus", UiTarget(source.id, source.bounds)),
+            before.copy(elements = listOf(source), screenId = "before"),
+            before.copy(elements = listOf(afterElement), screenId = "after")
+        )
+
+        assertEquals(PostconditionStatus.VERIFIED, result.status)
+    }
+
+    @Test
+    fun verifiesSetProgressAgainstRangeInfo() {
+        val base = screenWithInput("")
+        val source = base.elements.single().copy(range = UiRange(0, 0f, 100f, 10f))
+        val destination = source.copy(range = source.range?.copy(current = 42f))
+
+        val result = UiActionPostconditionVerifier.verify(
+            UiActionStep.NodeAction(
+                "set_progress",
+                UiTarget(source.id, source.bounds),
+                mapOf("value" to "42")
+            ),
+            base.copy(elements = listOf(source), screenId = "before"),
+            base.copy(elements = listOf(destination), screenId = "after")
+        )
+
+        assertEquals(PostconditionStatus.VERIFIED, result.status)
+    }
+
     private fun screenWithInput(text: String): UiScreenState = UiTreeIndexer.parse(
         """
         <hierarchy>

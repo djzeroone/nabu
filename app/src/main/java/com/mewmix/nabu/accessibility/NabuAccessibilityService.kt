@@ -33,15 +33,7 @@ import javax.xml.transform.stream.StreamResult
 
 class NabuAccessibilityService : AccessibilityService() {
     private val observationLock = Any()
-
-    @Volatile
-    private var lastObservationId: String? = null
-
-    @Volatile
-    private var lastObservedPackage: String? = null
-
-    @Volatile
-    private var lastObservedFingerprint: String? = null
+    private val actionObservationLease = ActionObservationLease()
 
     private var actionOverlay: ActionSessionOverlay? = null
 
@@ -93,7 +85,10 @@ class NabuAccessibilityService : AccessibilityService() {
     private fun captureSnapshotLocked(bindForAction: Boolean): UiSnapshot? {
         return try {
             val window = targetWindow()
-            val root = window?.root ?: rootInActiveWindow ?: return null
+            val root = window?.root ?: rootInActiveWindow ?: run {
+                clearActionLeaseLocked()
+                return null
+            }
             val packageName = root.packageName?.toString().orEmpty()
             val windowTitle = window?.title?.toString().orEmpty()
             val rotation = runCatching { display?.rotation ?: 0 }.getOrDefault(0)
@@ -107,23 +102,18 @@ class NabuAccessibilityService : AccessibilityService() {
                 windowTitle = windowTitle,
                 rotation = rotation,
                 displayBounds = Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels),
-                rootNode = uiNodeRoot
+                rootNode = uiNodeRoot,
+                windowId = window?.id ?: -1,
+                systemActions = currentSystemActionTokens()
             ))
             if (bindForAction) {
-                lastObservationId = snapshot.id
-                lastObservedPackage = packageName
-                lastObservedFingerprint = snapshot.stateFingerprint
+                actionObservationLease.bind(snapshot.toActionAuthority())
             } else {
-                if (lastObservationId != null) {
-                    val packageChanged = lastObservedPackage != null && lastObservedPackage != packageName
-                    val fingerprintChanged = lastObservedFingerprint != null && lastObservedFingerprint != snapshot.stateFingerprint
-                    if (packageChanged || fingerprintChanged) {
-                        clearActionLeaseLocked()
-                    }
-                }
+                actionObservationLease.invalidateIfDrifted(snapshot.toActionAuthority())
             }
             snapshot
         } catch (e: Exception) {
+            clearActionLeaseLocked()
             Log.e(TAG, "Failed to capture in-memory snapshot", e)
             null
         }
@@ -131,6 +121,23 @@ class NabuAccessibilityService : AccessibilityService() {
 
     private fun buildUiNodeTree(node: AccessibilityNodeInfo, path: String): UiNode {
         val bounds = Rect().also(node::getBoundsInScreen)
+        val (standardActions, customActions) = AndroidActionCatalog.capture(node.actionList)
+        val range = node.rangeInfo?.let {
+            UiRangeInfo(type = it.type, min = it.min, max = it.max, current = it.current)
+        }
+        val collection = node.collectionInfo?.let {
+            UiCollectionInfo(it.rowCount, it.columnCount, it.isHierarchical, it.selectionMode)
+        }
+        val collectionItem = node.collectionItemInfo?.let {
+            UiCollectionItemInfo(
+                it.rowIndex,
+                it.rowSpan,
+                it.columnIndex,
+                it.columnSpan,
+                it.isHeading,
+                it.isSelected
+            )
+        }
         val children = mutableListOf<UiNode>()
         for (index in 0 until node.childCount) {
             node.getChild(index)?.let { child ->
@@ -158,7 +165,17 @@ class NabuAccessibilityService : AccessibilityService() {
             isPassword = node.isPassword,
             isSelected = node.isSelected,
             boundsInScreen = bounds,
-            children = children
+            children = children,
+            standardActions = standardActions,
+            customActions = customActions,
+            movementGranularities = node.movementGranularities,
+            rangeInfo = range,
+            isAccessibilityFocused = node.isAccessibilityFocused,
+            isContextClickable = node.isContextClickable,
+            textSelectionStart = node.textSelectionStart,
+            textSelectionEnd = node.textSelectionEnd,
+            collectionInfo = collection,
+            collectionItemInfo = collectionItem
         )
     }
 
@@ -223,6 +240,25 @@ class NabuAccessibilityService : AccessibilityService() {
         val observationId = UUID.randomUUID().toString()
         val packageName = root.packageName?.toString().orEmpty()
         val capturedAt = System.currentTimeMillis()
+        val rotation = runCatching { display?.rotation ?: 0 }.getOrDefault(0)
+        val snapshot = UiSnapshotStore.updateSnapshot(
+            UiSnapshot(
+                id = observationId,
+                capturedAtMs = capturedAt,
+                packageName = packageName,
+                windowTitle = window?.title?.toString().orEmpty(),
+                rotation = rotation,
+                displayBounds = Rect(
+                    0,
+                    0,
+                    resources.displayMetrics.widthPixels,
+                    resources.displayMetrics.heightPixels
+                ),
+                rootNode = buildUiNodeTree(root, "0"),
+                windowId = window?.id ?: -1,
+                systemActions = currentSystemActionTokens()
+            )
+        )
         if (!writeHierarchy(root, window, observationId, xmlPath)) {
             throw IllegalStateException("Failed to capture UI hierarchy.")
         }
@@ -232,16 +268,14 @@ class NabuAccessibilityService : AccessibilityService() {
                 actualScreenshotPath = screenshotPath
             }
         }
-        lastObservationId = observationId
-        lastObservedPackage = packageName
-        lastObservedFingerprint = null
+        actionObservationLease.bind(snapshot.toActionAuthority())
         val result = JSONObject()
             .put("schema_version", 2)
             .put("observation_id", observationId)
             .put("captured_at_ms", capturedAt)
             .put("package", packageName)
             .put("window_title", window?.title?.toString().orEmpty())
-            .put("rotation", runCatching { display?.rotation ?: 0 }.getOrDefault(0))
+            .put("rotation", rotation)
             .put("display_bounds", JSONArray(listOf(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)))
             .put("xml_path", xmlPath)
         if (actualScreenshotPath != null) {
@@ -259,16 +293,30 @@ class NabuAccessibilityService : AccessibilityService() {
     fun performUiAction(action: String, params: JSONObject): JSONObject = synchronized(observationLock) {
         val observationId = params.optString("observation_id").trim()
         require(observationId.isNotEmpty()) { "observation_id is required." }
-        if (lastObservationId == null || observationId != lastObservationId) {
-            throw IllegalStateException("Action observation lease is stale or invalid (expected $lastObservationId, got $observationId).")
-        }
         val window = targetWindow()
         val root = window?.root ?: rootInActiveWindow ?: throw IllegalStateException("No active application window is available.")
         val currentPackage = root.packageName?.toString().orEmpty()
-        if (lastObservedPackage == null || currentPackage != lastObservedPackage) {
-            throw IllegalStateException("Active package changed since observation ($lastObservedPackage -> $currentPackage).")
+        val rotation = runCatching { display?.rotation ?: 0 }.getOrDefault(0)
+        val currentFingerprint = UiSnapshotFingerprint.compute(
+            packageName = currentPackage,
+            windowTitle = window?.title?.toString().orEmpty(),
+            rotation = rotation,
+            rootNode = buildUiNodeTree(root, "0"),
+            systemActions = currentSystemActionTokens()
+        )
+        val currentAuthority = ActionObservationAuthority(
+            observationId = observationId,
+            packageName = currentPackage,
+            windowId = window?.id ?: -1,
+            stateFingerprint = currentFingerprint,
+            rotation = rotation,
+            displayWidth = resources.displayMetrics.widthPixels,
+            displayHeight = resources.displayMetrics.heightPixels
+        )
+        when (val validation = actionObservationLease.consume(currentAuthority)) {
+            ActionLeaseValidation.Authorized -> Unit
+            is ActionLeaseValidation.Rejected -> throw IllegalStateException(validation.reason)
         }
-        clearActionLeaseLocked()
 
         val selector = params.optJSONObject("selector") ?: JSONObject()
         val target = findNode(root, selector)
@@ -276,7 +324,7 @@ class NabuAccessibilityService : AccessibilityService() {
             "ui_tap" -> {
                 val nodeSuccess = target?.let { performNodeAction(it, AccessibilityNodeInfo.ACTION_CLICK) } == true
                 if (nodeSuccess) {
-                    params.put("mechanism", "node")
+                    params.put("mechanism", "semantic_node")
                     true
                 } else {
                     val gestureSuccess = runCatching { dispatchPointGesture(params, longPress = false) }.getOrDefault(false)
@@ -287,7 +335,7 @@ class NabuAccessibilityService : AccessibilityService() {
             "ui_long_press" -> {
                 val nodeSuccess = target?.let { performNodeAction(it, AccessibilityNodeInfo.ACTION_LONG_CLICK) } == true
                 if (nodeSuccess) {
-                    params.put("mechanism", "node")
+                    params.put("mechanism", "semantic_node")
                     true
                 } else {
                     val gestureSuccess = runCatching { dispatchPointGesture(params, longPress = true) }.getOrDefault(false)
@@ -339,13 +387,81 @@ class NabuAccessibilityService : AccessibilityService() {
                 val node = target ?: throw IllegalArgumentException("Target node was not found.")
                 performNodeAction(node, android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
             }
-            "ui_global_action" -> when (params.optString("global_action").lowercase()) {
-                "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
-                "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
-                "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
-                "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-                "quick_settings" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
-                else -> throw IllegalArgumentException("Unsupported global_action: ${params.optString("global_action")}")
+            "ui_node_action" -> {
+                val node = target ?: throw IllegalArgumentException("Target node was not found.")
+                val token = params.optString("node_action").trim().lowercase()
+                val standard = StandardNodeAction.entries.firstOrNull { it.token == token }
+                    ?: throw IllegalArgumentException("Unknown standard node action '$token'.")
+                val actionId = AndroidActionCatalog.actionIdForToken(token)
+                    ?: throw IllegalArgumentException("Node action '$token' is unavailable on this Android version.")
+                require(node.actionList.any { it.id == actionId }) {
+                    "Target node does not currently advertise '$token'."
+                }
+                require(!(node.isPassword && standard in PASSWORD_BLOCKED_NODE_ACTIONS)) {
+                    "Clipboard and text actions cannot target password fields."
+                }
+                val arguments = buildNodeActionArguments(standard, node, params)
+                val nodeSuccess = if (arguments == null) {
+                    node.performAction(actionId)
+                } else {
+                    node.performAction(actionId, arguments)
+                }
+                if (nodeSuccess) params.put("mechanism", "semantic_node")
+                nodeSuccess
+            }
+            "ui_custom_action" -> {
+                val node = target ?: throw IllegalArgumentException("Target node was not found.")
+                val actionId = params.optInt("trusted_action_id", Int.MIN_VALUE)
+                require(actionId != Int.MIN_VALUE) { "A trusted observation-scoped action mapping is required." }
+                require(AndroidActionCatalog.standardForId(actionId) == null) {
+                    "Standard actions must use their canonical token."
+                }
+                val advertised = node.actionList.singleOrNull { it.id == actionId }
+                    ?: throw IllegalArgumentException("Custom action is no longer advertised by the target.")
+                val expectedLabel = params.optString("custom_action_label").trim()
+                require(expectedLabel.isNotEmpty() && advertised.label?.toString()?.trim() == expectedLabel) {
+                    "Custom action label changed since observation."
+                }
+                val customSuccess = node.performAction(actionId)
+                if (customSuccess) params.put("mechanism", "custom_accessibility_action")
+                customSuccess
+            }
+            "ui_gesture" -> {
+                val token = params.optString("gesture").trim().lowercase()
+                val destination = params.optJSONObject("destination_selector")?.let { findNode(root, it) }
+                val semanticDragAvailable = token == "drag_drop" && target != null && destination != null &&
+                    target.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_DRAG_START.id } &&
+                    destination.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_DRAG_DROP.id }
+                val gestureSuccess = if (semanticDragAvailable) {
+                    val started = target.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_DRAG_START.id)
+                    if (started) {
+                        val dropped = destination.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_DRAG_DROP.id)
+                        if (!dropped) {
+                            target.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_DRAG_CANCEL.id)
+                        }
+                        if (dropped) params.put("mechanism", "semantic_drag_transaction")
+                        dropped
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+                val completed = gestureSuccess || dispatchBoundedGesture(params)
+                if (completed && !gestureSuccess) {
+                    params.put("mechanism", if (token == "drag_drop") "gesture_drag_transaction" else "gesture")
+                }
+                completed
+            }
+            "ui_global_action" -> {
+                val token = params.optString("global_action").trim().lowercase()
+                val globalAction = GlobalSystemAction.fromToken(token)
+                    ?: throw IllegalArgumentException("Unsupported global_action: $token")
+                require(globalAction.plannerAllowed) { "Global action '$token' is reserved for explicit trusted use." }
+                require(token in currentSystemActionTokens()) { "Global action '$token' is unavailable on this device." }
+                val globalSuccess = performGlobalAction(globalAction.actionId)
+                if (globalSuccess) params.put("mechanism", "global_action")
+                globalSuccess
             }
             else -> throw IllegalArgumentException("Unknown UI action: ${action}")
         }
@@ -362,10 +478,129 @@ class NabuAccessibilityService : AccessibilityService() {
     }
 
     private fun clearActionLeaseLocked() {
-        lastObservationId = null
-        lastObservedPackage = null
-        lastObservedFingerprint = null
+        actionObservationLease.clear()
     }
+
+    private fun buildNodeActionArguments(
+        action: StandardNodeAction,
+        node: AccessibilityNodeInfo,
+        params: JSONObject
+    ): Bundle? = when (action) {
+        StandardNodeAction.SET_TEXT -> {
+            val text = params.optString("text")
+            require(text.isNotEmpty()) { "set_text requires non-empty text." }
+            Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+        }
+        StandardNodeAction.SET_PROGRESS -> {
+            val value = params.optDouble("value", Double.NaN)
+            require(value.isFinite()) { "set_progress requires a finite value." }
+            val range = node.rangeInfo ?: throw IllegalArgumentException("Target has no RangeInfo.")
+            require(value >= range.min && value <= range.max) {
+                "Requested progress $value is outside ${range.min}..${range.max}."
+            }
+            Bundle().apply {
+                putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, value.toFloat())
+            }
+        }
+        StandardNodeAction.SET_SELECTION -> {
+            val start = params.optInt("selection_start", -1)
+            val end = params.optInt("selection_end", -1)
+            require(start >= 0 && end >= start) { "set_selection requires a valid start/end range." }
+            Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
+            }
+        }
+        StandardNodeAction.SCROLL_TO_POSITION -> {
+            val row = params.optInt("row", -1)
+            val column = params.optInt("column", -1)
+            require(row >= 0 || column >= 0) { "scroll_to_position requires row or column." }
+            Bundle().apply {
+                if (row >= 0) putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT, row)
+                if (column >= 0) putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_COLUMN_INT, column)
+            }
+        }
+        StandardNodeAction.SCROLL_IN_DIRECTION -> {
+            val direction = when (params.optString("direction").lowercase()) {
+                "up" -> android.view.View.FOCUS_UP
+                "down" -> android.view.View.FOCUS_DOWN
+                "left" -> android.view.View.FOCUS_LEFT
+                "right" -> android.view.View.FOCUS_RIGHT
+                "forward" -> android.view.View.FOCUS_FORWARD
+                "backward" -> android.view.View.FOCUS_BACKWARD
+                else -> throw IllegalArgumentException("scroll_in_direction requires a supported direction.")
+            }
+            Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_DIRECTION_INT, direction)
+                if (params.has("scroll_amount")) {
+                    val amount = params.getDouble("scroll_amount")
+                    require(amount.isFinite() && amount > 0.0) { "scroll_amount must be positive and finite." }
+                    putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_SCROLL_AMOUNT_FLOAT, amount.toFloat())
+                }
+            }
+        }
+        StandardNodeAction.NEXT_AT_MOVEMENT_GRANULARITY,
+        StandardNodeAction.PREVIOUS_AT_MOVEMENT_GRANULARITY -> {
+            val granularity = when (params.optString("granularity").lowercase()) {
+                "character" -> AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER
+                "word" -> AccessibilityNodeInfo.MOVEMENT_GRANULARITY_WORD
+                "line" -> AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE
+                "paragraph" -> AccessibilityNodeInfo.MOVEMENT_GRANULARITY_PARAGRAPH
+                "page" -> AccessibilityNodeInfo.MOVEMENT_GRANULARITY_PAGE
+                else -> throw IllegalArgumentException("Unsupported movement granularity.")
+            }
+            require(node.movementGranularities and granularity != 0) {
+                "Target does not advertise the requested movement granularity."
+            }
+            Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT, granularity)
+                putBoolean(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN,
+                    params.optBoolean("extend_selection", false)
+                )
+            }
+        }
+        StandardNodeAction.NEXT_HTML_ELEMENT,
+        StandardNodeAction.PREVIOUS_HTML_ELEMENT -> Bundle().apply {
+            putString(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_HTML_ELEMENT_STRING,
+                params.optString("html_element").trim().takeIf(String::isNotEmpty)
+                    ?: throw IllegalArgumentException("HTML navigation requires html_element.")
+            )
+        }
+        StandardNodeAction.MOVE_WINDOW -> {
+            val x = params.optInt("x", -1)
+            val y = params.optInt("y", -1)
+            require(x in 0..resources.displayMetrics.widthPixels && y in 0..resources.displayMetrics.heightPixels) {
+                "move_window coordinates must be inside the display."
+            }
+            Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVE_WINDOW_X, x)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVE_WINDOW_Y, y)
+            }
+        }
+        StandardNodeAction.PRESS_AND_HOLD -> {
+            val duration = params.optInt("duration_ms", -1)
+            require(duration in 200..5_000) { "press_and_hold duration must be 200..5000 ms." }
+            Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_PRESS_AND_HOLD_DURATION_MILLIS_INT, duration)
+            }
+        }
+        else -> null
+    }
+
+    private fun UiSnapshot.toActionAuthority(): ActionObservationAuthority =
+        ActionObservationAuthority(
+            observationId = id,
+            packageName = packageName,
+            windowId = windowId,
+            stateFingerprint = stateFingerprint,
+            rotation = rotation,
+            displayWidth = displayBounds.width(),
+            displayHeight = displayBounds.height()
+        )
 
     private fun targetWindow(): AccessibilityWindowInfo? {
         val appWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
@@ -377,6 +612,15 @@ class NabuAccessibilityService : AccessibilityService() {
             ?: appWindows.maxByOrNull { it.layer }
             ?: windows.firstOrNull()
     }
+
+    private fun currentSystemActionTokens(): Set<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            systemActions.mapNotNullTo(linkedSetOf()) { action ->
+                GlobalSystemAction.fromId(action.id)?.takeIf { it.plannerAllowed }?.token
+            }
+        } else {
+            emptySet()
+        }
 
     private fun writeHierarchy(
         root: AccessibilityNodeInfo,
@@ -534,6 +778,69 @@ class NabuAccessibilityService : AccessibilityService() {
         return kotlinx.coroutines.runBlocking { deferred.await() }
     }
 
+    private fun dispatchBoundedGesture(params: JSONObject): Boolean {
+        val token = params.optString("gesture").trim().lowercase()
+        val start = normalizedPoint(params, "start_x", "start_y")
+            ?: normalizedBoundsCenter(params.optJSONArray("fallback_bounds"))
+        val end = normalizedPoint(params, "end_x", "end_y")
+            ?: normalizedBoundsCenter(params.optJSONArray("destination_bounds"))
+        val center = normalizedPoint(params, "center_x", "center_y") ?: start
+        val points = BoundedGestureCatalog.parsePoints(params.optString("points"))
+        val duration = if (params.has("duration_ms")) params.getLong("duration_ms") else when (token) {
+            "press_and_hold" -> 650L
+            "drag_drop", "polyline_drag" -> 700L
+            "pinch_in", "pinch_out", "two_finger_swipe" -> 350L
+            else -> 250L
+        }
+        val plan = BoundedGestureCatalog.build(token, start, end, center, points, duration)
+        require(plan.strokes.size <= GestureDescription.getMaxStrokeCount()) {
+            "Gesture exceeds the device stroke limit."
+        }
+        require(plan.strokes.maxOf { it.startTimeMs + it.durationMs } <= GestureDescription.getMaxGestureDuration()) {
+            "Gesture exceeds the device duration limit."
+        }
+        val width = resources.displayMetrics.widthPixels.toFloat()
+        val height = resources.displayMetrics.heightPixels.toFloat()
+        val builder = GestureDescription.Builder()
+        plan.strokes.forEach { stroke ->
+            val first = stroke.points.first()
+            val path = Path().apply {
+                moveTo(first.x * width, first.y * height)
+                stroke.points.drop(1).forEach { point -> lineTo(point.x * width, point.y * height) }
+            }
+            builder.addStroke(
+                GestureDescription.StrokeDescription(path, stroke.startTimeMs, stroke.durationMs)
+            )
+        }
+        val deferred = CompletableDeferred<Boolean>()
+        dispatchGesture(builder.build(), object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription) = deferred.complete(true).let { Unit }
+            override fun onCancelled(gestureDescription: GestureDescription) = deferred.complete(false).let { Unit }
+        }, null)
+        return kotlinx.coroutines.runBlocking { deferred.await() }
+    }
+
+    private fun normalizedPoint(params: JSONObject, xKey: String, yKey: String): NormalizedPoint? {
+        if (!params.has(xKey) && !params.has(yKey)) return null
+        require(params.has(xKey) && params.has(yKey)) { "$xKey and $yKey must be supplied together." }
+        return NormalizedPoint(params.getDouble(xKey).toFloat(), params.getDouble(yKey).toFloat())
+    }
+
+    private fun normalizedBoundsCenter(bounds: JSONArray?): NormalizedPoint? {
+        if (bounds == null) return null
+        require(bounds.length() == 4) { "Bounds must contain four integers." }
+        val left = bounds.getInt(0)
+        val top = bounds.getInt(1)
+        val right = bounds.getInt(2)
+        val bottom = bounds.getInt(3)
+        val width = resources.displayMetrics.widthPixels
+        val height = resources.displayMetrics.heightPixels
+        require(right > left && bottom > top && left >= 0 && top >= 0 && right <= width && bottom <= height) {
+            "Gesture bounds are outside the current display."
+        }
+        return NormalizedPoint((left + right) / 2f / width, (top + bottom) / 2f / height)
+    }
+
     private fun dispatchScrollGesture(direction: String, params: JSONObject): Boolean {
         val displayMetrics = resources.displayMetrics
         val screenWidth = displayMetrics.widthPixels.toFloat()
@@ -600,6 +907,13 @@ class NabuAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
             AccessibilityEvent.TYPE_VIEW_SCROLLED,
             AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        )
+        private val PASSWORD_BLOCKED_NODE_ACTIONS = setOf(
+            StandardNodeAction.COPY,
+            StandardNodeAction.CUT,
+            StandardNodeAction.PASTE,
+            StandardNodeAction.SET_TEXT,
+            StandardNodeAction.SET_SELECTION
         )
 
         private val _isConnected = kotlinx.coroutines.flow.MutableStateFlow(false)

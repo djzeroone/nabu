@@ -38,8 +38,21 @@ sealed interface UiActionStep {
     data object PressRecents : UiActionStep
     data object OpenNotifications : UiActionStep
     data object OpenQuickSettings : UiActionStep
+    data class GlobalAction(val action: String) : UiActionStep
     data class Scroll(val direction: ScrollDirection, val target: UiTarget?) : UiActionStep
     data class Focus(val target: UiTarget) : UiActionStep
+    data class NodeAction(
+        val action: String,
+        val target: UiTarget,
+        val arguments: Map<String, String> = emptyMap()
+    ) : UiActionStep
+    data class CustomAction(val actionRef: String, val target: UiTarget) : UiActionStep
+    data class Gesture(
+        val gesture: String,
+        val target: UiTarget,
+        val destination: UiTarget? = null,
+        val arguments: Map<String, String> = emptyMap()
+    ) : UiActionStep
     data class Wait(val milliseconds: Long) : UiActionStep
     data class Assert(val condition: UiAssertion) : UiActionStep
     data class AskUser(val reason: String) : UiActionStep
@@ -170,12 +183,35 @@ object UiActionPlanParser {
             "press_recents" -> UiActionStep.PressRecents.also { checkKeys(json, "action") }
             "open_notifications" -> UiActionStep.OpenNotifications.also { checkKeys(json, "action") }
             "open_quick_settings" -> UiActionStep.OpenQuickSettings.also { checkKeys(json, "action") }
+            "global_action" -> UiActionStep.GlobalAction(json.requiredString("global_action"))
+                .also { checkKeys(json, "action", "global_action") }
             "scroll" -> UiActionStep.Scroll(
                 direction = ScrollDirection.valueOf(json.requiredString("direction").uppercase()),
                 target = parseTarget(json.optJsonObject("target"))
             ).also { checkKeys(json, "action", "direction", "target") }
             "focus" -> UiActionStep.Focus(parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."))
                 .also { checkKeys(json, "action", "target") }
+            "node_action" -> UiActionStep.NodeAction(
+                action = json.requiredString("node_action"),
+                target = parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."),
+                arguments = json.optJsonObject("arguments")?.entrySet()?.associate { (key, value) ->
+                    require(value.isJsonPrimitive) { "Node action argument '$key' must be primitive." }
+                    key to value.asString
+                }.orEmpty()
+            ).also { checkKeys(json, "action", "node_action", "target", "arguments") }
+            "custom_action" -> UiActionStep.CustomAction(
+                actionRef = json.requiredString("action_ref"),
+                target = parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target.")
+            ).also { checkKeys(json, "action", "action_ref", "target") }
+            "gesture" -> UiActionStep.Gesture(
+                gesture = json.requiredString("gesture"),
+                target = parseTarget(json.optJsonObject("target")) ?: error("Missing or invalid target."),
+                destination = parseTarget(json.optJsonObject("destination")),
+                arguments = json.optJsonObject("arguments")?.entrySet()?.associate { (key, value) ->
+                    require(value.isJsonPrimitive) { "Gesture argument '$key' must be primitive." }
+                    key to value.asString
+                }.orEmpty()
+            ).also { checkKeys(json, "action", "gesture", "target", "destination", "arguments") }
             "wait" -> UiActionStep.Wait(json.optLong("ms") ?: error("Missing ms."))
                 .also { checkKeys(json, "action", "ms") }
             "assert" -> UiActionStep.Assert(parseAssertion(json.optJsonObject("condition")) ?: error("Missing or invalid condition."))
@@ -315,7 +351,10 @@ object UiActionPlanParser {
         else -> normalized
     }
 
-    private val TARGET_ACTIONS = setOf("tap", "long_press", "type_text", "scroll", "focus")
+    private val TARGET_ACTIONS = setOf(
+        "tap", "long_press", "type_text", "scroll", "focus", "node_action", "custom_action",
+        "gesture"
+    )
     private val UI_TARGET_KEYS = setOf(
         "element_id", "selector_id", "target_id", "fallback_bounds", "text_contains", "label"
     )
@@ -324,6 +363,7 @@ object UiActionPlanParser {
     )
     private val NON_TARGET_ACTIONS = setOf(
         "press_back", "press_home", "press_recents", "open_notifications", "open_quick_settings",
+        "global_action",
         "wait", "ask_user", "done", "open_app", "open_settings_page", "open_url",
         "share_text", "open_camera", "share_captured_media"
     )
@@ -333,6 +373,7 @@ object UiActionPlanParser {
     private val SUPPORTED_ACTIONS = TARGET_ACTIONS +
         setOf(
             "press_back", "press_home", "press_recents", "open_notifications", "open_quick_settings",
+            "global_action",
             "wait", "assert", "ask_user", "done",
             "open_app", "open_settings_page", "open_url", "share_text", "open_camera", "share_captured_media"
         )

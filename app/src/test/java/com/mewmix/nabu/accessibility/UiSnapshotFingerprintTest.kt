@@ -22,7 +22,30 @@ class UiSnapshotFingerprintTest {
         assertNotEquals(before.stateFingerprint, after.stateFingerprint)
     }
 
-    private fun snapshot(text: String) = UiSnapshot(
+    @Test
+    fun `action capability change has a different fingerprint`() {
+        val before = snapshot(
+            text = "Send",
+            actions = listOf(SnapshotNodeAction(16, "click", "Send"))
+        )
+        val after = snapshot(text = "Send", actions = emptyList())
+
+        assertNotEquals(before.stateFingerprint, after.stateFingerprint)
+    }
+
+    @Test
+    fun `runtime system action change has a different fingerprint`() {
+        val before = snapshot(text = "Home", systemActions = setOf("back", "home"))
+        val after = snapshot(text = "Home", systemActions = setOf("back"))
+
+        assertNotEquals(before.stateFingerprint, after.stateFingerprint)
+    }
+
+    private fun snapshot(
+        text: String,
+        actions: List<SnapshotNodeAction> = emptyList(),
+        systemActions: Set<String> = emptySet()
+    ) = UiSnapshot(
         id = java.util.UUID.randomUUID().toString(),
         capturedAtMs = 1L,
         packageName = "com.android.settings",
@@ -49,7 +72,9 @@ class UiSnapshotFingerprintTest {
             isPassword = false,
             isSelected = false,
             boundsInScreen = Rect(0, 0, 1080, 2400),
-            children = emptyList()
-        )
+            children = emptyList(),
+            standardActions = actions
+        ),
+        systemActions = systemActions
     )
 }

@@ -5,6 +5,9 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
 import com.mewmix.nabu.chat.LlmStructuredToolCall
 import com.mewmix.nabu.tools.CapabilityId
+import com.mewmix.nabu.accessibility.StandardNodeAction
+import com.mewmix.nabu.accessibility.GlobalSystemAction
+import com.mewmix.nabu.accessibility.BoundedGestureCatalog
 
 object ConstrainedDecisionDecoder {
 
@@ -85,6 +88,7 @@ object ConstrainedDecisionDecoder {
                 val argsObj = root.getAsJsonObject("args")
                 val arguments = mutableMapOf<String, String>()
                 argsObj?.entrySet()?.forEach { (k, v) ->
+                    require(k in ACTION_ARGUMENT_KEYS) { "Unknown action argument '$k'." }
                     require(v.isJsonPrimitive) { "Action argument '$k' must be a primitive value." }
                     arguments[k] = v.asString
                 }
@@ -179,6 +183,10 @@ object ConstrainedDecisionDecoder {
             normalized.startsWith("share_text") -> "share_text"
             normalized.startsWith("share_cap") || normalized.startsWith("share_media") -> "share_captured_media"
             normalized.startsWith("focus") -> "focus"
+            normalized.startsWith("node_action") || normalized.startsWith("semantic_action") -> "node_action"
+            normalized.startsWith("custom_action") -> "custom_action"
+            normalized.startsWith("global_action") -> "global_action"
+            normalized.startsWith("gesture") -> "gesture"
             else -> normalized
         }
         return Operation.entries.firstOrNull { it.name.equals(canonical, ignoreCase = true) }
@@ -233,6 +241,25 @@ object ConstrainedDecisionDecoder {
                     "SHARE_CAPTURED_MEDIA requires expected_destination."
                 }
             }
+            Operation.NODE_ACTION -> require(
+                arguments["action"] in StandardNodeAction.entries.map { it.token }
+            ) { "NODE_ACTION requires a known canonical action token." }
+            Operation.CUSTOM_ACTION -> require(arguments["action_ref"]?.matches(Regex("ca\\d+")) == true) {
+                "CUSTOM_ACTION requires an observation-scoped caN action_ref."
+            }
+            Operation.GLOBAL_ACTION -> require(
+                GlobalSystemAction.fromToken(arguments["global_action"].orEmpty())?.plannerAllowed == true
+            ) { "GLOBAL_ACTION requires a known planner-allowed global_action token." }
+            Operation.GESTURE -> {
+                require(arguments["gesture"] in BoundedGestureCatalog.plannerTokens) {
+                    "GESTURE requires a known bounded gesture token."
+                }
+                arguments["destination_target"]?.let { destination ->
+                    require(destination.matches(Regex("(?:p\\d+|e_[a-fA-F0-9]+)"))) {
+                        "GESTURE destination_target must be a supplied target ID."
+                    }
+                }
+            }
             else -> Unit
         }
     }
@@ -272,7 +299,10 @@ object ConstrainedDecisionDecoder {
         Operation.TAP,
         Operation.LONG_PRESS,
         Operation.TYPE_TEXT,
-        Operation.FOCUS
+        Operation.FOCUS,
+        Operation.NODE_ACTION,
+        Operation.CUSTOM_ACTION,
+        Operation.GESTURE
     )
 
     private val ACTION_ARGUMENT_KEYS = setOf(
@@ -285,7 +315,31 @@ object ConstrainedDecisionDecoder {
         "facing",
         "ms",
         "target_package",
-        "expected_destination"
+        "expected_destination",
+        "action",
+        "action_ref",
+        "value",
+        "selection_start",
+        "selection_end",
+        "row",
+        "column",
+        "granularity",
+        "extend_selection",
+        "x",
+        "y",
+        "duration_ms",
+        "global_action",
+        "gesture",
+        "destination_target",
+        "start_x",
+        "start_y",
+        "end_x",
+        "end_y",
+        "center_x",
+        "center_y",
+        "points",
+        "html_element",
+        "scroll_amount"
     )
 
     private val EXACT_PLANNER_ID = Regex("""(?i)(?:p\d+|e_[a-f0-9]+)""")
