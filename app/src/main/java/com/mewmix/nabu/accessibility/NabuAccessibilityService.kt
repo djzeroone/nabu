@@ -183,6 +183,10 @@ class NabuAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Service interrupted")
     }
 
+    fun showActionSurface() {
+        mainExecutor.execute { actionOverlay?.show() }
+    }
+
     override fun onDestroy() {
         actionOverlay?.hide()
         actionOverlay = null
@@ -925,5 +929,11 @@ class NabuAccessibilityService : AccessibilityService() {
                 field = value
                 _isConnected.value = value != null
             }
+
+        fun requestActionSurface(): Boolean {
+            val service = instance ?: return false
+            service.showActionSurface()
+            return true
+        }
     }
 }
