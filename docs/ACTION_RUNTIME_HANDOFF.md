@@ -1,7 +1,7 @@
 # Android Action Runtime Engineering Handoff
 
-Date: 2026-08-20  
-Branch: `latest`  
+Date: 2026-08-21
+Branch: `latest`
 Device: OnePlus CPH2583 (`eb10bd5f`)
 
 ## FOUND
@@ -68,11 +68,30 @@ imports bounded action turns once, and routes follow-up text back through
 `submitFollowUp()` with the action model and confirmation UI. It no longer re-sends the current
 goal through `EXTRA_INITIAL_PROMPT`. Only one action runner can own the session.
 
+### `f198316` — Route assistant surfaces through action dispatcher
+
+Files: the voice interaction session, Quick Settings tile, Accessibility service, private
+no-display entry Activity/manifest entry, and entry regression test.
+
+Invariant established: the Android assistant is a lightweight typed action/confirmation surface
+that dispatches directly into `ActionRequestDispatcher` and hides while the target app is acted on.
+Quick Settings collapses SystemUI through a private trusted Activity and opens the same
+Accessibility overlay when connected, falling back to Chat only when the service is unavailable.
+No request text is accepted through an exported component.
+
+### `954f487` — Bound action session working memory
+
+Files: `ActionSession.kt`, `ActionRequestDispatcher.kt`, and working-memory tests.
+
+Invariant established: the process session retains at most 8 recent turns and 64 global step
+receipts; each turn contains only the steps from that turn rather than cumulative copies.
+
 ## ARCHITECTURE
 
 - **ActionSession:** immutable `StateFlow` snapshots owned process-wide by
   `ActionRequestDispatcher`. `ActionRequestOwnership` grants a monotonic epoch to exactly one job.
-  The same ID is passed into the orchestrator, lifecycle manager, trace, overlay, and Chat handoff.
+  The same ID is passed into the orchestrator, lifecycle manager, trace, assistant, overlay, and
+  Chat handoff. Working memory is bounded to the newest 8 turns/64 receipts.
 - **Observation:** `UiSnapshotBuilder` captures package/window/display state and node capabilities.
   `ActionObservationLease` binds observation ID, package, window, capability-sensitive
   fingerprint, rotation, and display geometry. The service reconstructs live evidence immediately
@@ -135,23 +154,23 @@ channel itself.
 - Installed and candidate certificate SHA-256:
   `ff63128ba761b251d8c8e045280b136f6e5ccb9cd16185ad8fbc738d0c23bd89`.
 - Final candidate and pulled installed APK SHA-256:
-  `d2026a38790cf7b56fec4c107ab7e90020f9c60405ee09b97947bf1c2adb98e6`.
+  `ff54779459bed60405280f3d4bbca6d03d260a352d4ccce8851854506fadc6ba`.
 - Build: `./gradlew app:assembleRelease --no-daemon` — PASS (minified/R8).
 - Update: `adb install -r app/build/outputs/apk/release/app-release.apk` — SUCCESS.
 - `firstInstallTime` remained `2026-06-28 10:04:19`; final `lastUpdateTime` is
-  `2026-08-20 23:54:00`; data remains `/data/user/0/com.mewmix.nabu`.
+  `2026-08-21 00:08:32`; data remains `/data/user/0/com.mewmix.nabu`.
 - `READ_CONTACTS`, `RECORD_AUDIO`, `READ_MEDIA_AUDIO`, and `POST_NOTIFICATIONS` remain granted.
 - No uninstall, `pm clear`, or differently signed/debug APK was used.
 - Production manifest/package inspection contains no `ActionReceiver` or `ACTION_EXECUTE`.
-- Final cold launch: PASS, `MainActivity`, 419 ms; recent logs contained no fatal Nabu crash.
+- Final cold launch: PASS, `MainActivity`, 524 ms; recent logs contained no fatal Nabu crash.
 
 ## TESTS
 
 - `./gradlew :app:compileDebugKotlin :app:testDebugUnitTest --no-daemon`: PASS.
-- Actual JUnit XML totals: **291 tests, 0 failures, 0 errors, 0 skipped**.
+- Actual JUnit XML totals: **294 tests, 0 failures, 0 errors, 0 skipped**.
 - Coverage added for observation leases, capability-sensitive fingerprints, action-catalog/raw-ID
   invariants, compact snapshot projection, bounded gestures, validators, postcondition verifier,
-  and dispatcher ownership.
+  dispatcher ownership, bounded contextual memory, and the private assistant/tile entry fallback.
 - One asynchronous Robolectric resource warning from `GlobalRuntimeViewModel` appeared after the
   successful suite; it did not fail a test and is unrelated to the action-runtime changes.
 - `git diff --check`: PASS for the implementation changes.
@@ -166,8 +185,9 @@ ActionSession ID.
 | Scenario | Starting state / entry | Session ID | Result and evidence | Latency | Status |
 |---|---|---:|---|---:|---|
 | Same-signer in-place update | Existing release with user data; `adb install -r` | N/A | Candidate signer matched installed signer; install succeeded; first-install time, data directory, and grants preserved | N/A | PASS |
-| Release cold launch | Updated package stopped; explicit MainActivity launch | N/A | Activity status `ok`; no matching fatal crash | 419 ms | PASS |
+| Release cold launch | Updated package stopped; explicit MainActivity launch | N/A | Activity status `ok`; no matching fatal crash | 524 ms | PASS |
 | Production receiver hardening | Final release APK/package inspection | N/A | No `ActionReceiver`/`ACTION_EXECUTE` entry | N/A | PASS |
+| Quick Settings entry | Shell requested the real tile service while Accessibility was disabled | N/A | Command returned without error, but the tile was not added/listening and MainActivity remained foreground; no fallback claim made | Not measured | NOT VERIFIED |
 | Tap through stale-state rejection | Accessibility disabled | Not created | Runtime correctly cannot observe/act | Not measured | BLOCKED |
 | Coordinate fallback / long press / double tap | Accessibility disabled | Not created | Not executed | Not measured | BLOCKED |
 | Text/focus/selection/copy/paste | Accessibility disabled | Not created | Not executed | Not measured | BLOCKED |
@@ -189,12 +209,10 @@ timestamps. Invocation-to-first-action is derived from request receipt to first 
 
 No honest live first-action/model/action/verification/workflow distributions or model-call and
 recovery counts are available because Accessibility was disabled. Cold application launch was
-419 ms; this is not action-runtime latency and must not be used as such.
+524 ms; this is not action-runtime latency and must not be used as such.
 
 ## FOUND / NOT FIXED
 
-- `NabuVoiceInteractionSession` remains a shallow launch/control surface rather than a rich live
-  action console. It still converges on shared app entry, but was not expanded in this change.
 - `AutomationSessionManager` remains as the process-lifecycle/checkpoint component beneath the
   canonical ActionSession. Identity is unified, but the two snapshot types were not mechanically
   collapsed into one giant state class.
