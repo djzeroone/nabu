@@ -40,6 +40,11 @@ class UiAutomationOrchestrator(
     private val onUserQuestion: suspend (String) -> Unit = {},
     private val onUserQuestionCleared: suspend () -> Unit = {},
     private val externalSessionId: String? = null,
+    private val onRuntimeEvent: (
+        name: String,
+        elapsedMs: Long,
+        fields: Map<String, Any?>
+    ) -> Unit = { _, _, _ -> },
     private val logger: (String) -> Unit = {}
 ) {
     private data class Observation(
@@ -70,7 +75,13 @@ class UiAutomationOrchestrator(
         invocationStartedMonotonicMs = monotonicNowMs()
         firstPhysicalActionRecorded = false
         val sessionId = externalSessionId ?: UUID.randomUUID().toString()
-        val trace = AutomationTraceRecorder(sessionId, logger)
+        val trace = AutomationTraceRecorder(
+            sessionId = sessionId,
+            logger = logger,
+            onEvent = { event ->
+                onRuntimeEvent(event.name, event.elapsedMs, event.fields)
+            }
+        )
         trace.emit("session_requested", mapOf("goal" to goal, "scheduled" to isScheduled))
         if (!sessionMutex.tryLock()) {
             onProgress("Queue", "Waiting for the active device-control session to finish")
@@ -634,6 +645,7 @@ class UiAutomationOrchestrator(
             }
 
             progress("Verify ${actionIndex + 1}", "Observing the resulting screen")
+            trace("verification_started", mapOf("index" to actionIndex))
             val next = observeAfterAction(observation, action)
                 ?: return@execution failure("UI action ran, but the resulting screen could not be observed.")
             val assertion = actionPlan.steps.filterIsInstance<UiActionStep.Assert>().lastOrNull()?.condition
@@ -667,6 +679,14 @@ class UiAutomationOrchestrator(
             unchangedCount = if (changed) 0 else unchangedCount + 1
             val postconditionFailed = assertionMatched == false ||
                 builtInPostcondition.status == PostconditionStatus.FAILED
+            trace(
+                "verification_completed",
+                mapOf(
+                    "index" to actionIndex,
+                    "success" to !postconditionFailed,
+                    "status" to builtInPostcondition.status.name.lowercase()
+                )
+            )
             val postconditionDetail = buildList {
                 when (assertionMatched) {
                     true -> add("Planner postcondition matched; continue until an explicit done action.")
@@ -933,6 +953,10 @@ class UiAutomationOrchestrator(
         goalAppCandidates: List<DeviceAction.AppCandidate>,
         jsonRetry: Boolean = false
     ): String? {
+        trace(
+            "planner_request_started",
+            mapOf("screen_id" to observation.screen.screenId, "json_retry" to jsonRetry)
+        )
         val userContent = buildPlannerInput(goal, observation.screen, history, goalAppCandidates)
         val attachScreenshot = observation.screenshotPath != null && shouldAttachScreenshot(jsonRetry)
         logger(
@@ -981,6 +1005,7 @@ class UiAutomationOrchestrator(
             if (raw.isBlank()) {
                 logger("UiAutomation native structured generation returned no decision; falling back to JSON")
             } else {
+                trace("planner_first_response", mapOf("native_structured" to true))
                 onModelOutput(raw)
                 logger(
                     "UiAutomation native structured output screen=${observation.screen.screenId} " +
@@ -1004,10 +1029,14 @@ class UiAutomationOrchestrator(
         }
         val completion = CompletableDeferred<String?>()
         val completed = AtomicBoolean(false)
+        val firstResponse = AtomicBoolean(false)
         val output = StringBuilder()
         val plannerStartedMs = monotonicNowMs()
         backend.sendMessage(conversation) { partial, done ->
             if (partial.isNotEmpty()) {
+                if (firstResponse.compareAndSet(false, true)) {
+                    trace("planner_first_response", mapOf("native_structured" to false))
+                }
                 output.append(partial)
                 onModelOutput(partial)
             }
@@ -1217,19 +1246,26 @@ class UiAutomationOrchestrator(
                 "ui_global_action"
             }
             is UiActionStep.OpenApp -> {
-                markPhysicalActionDispatch(action)
+                val started = markPhysicalActionDispatch(action)
                 val result = DeviceAction.openApp(context, action.packageName, "")
-                return if (result.isError) failure(result.message) else success(result.message)
+                return completePhysicalAction(
+                    action,
+                    started,
+                    if (result.isError) failure(result.message) else success(result.message),
+                    "trusted_intent"
+                )
             }
             is UiActionStep.OpenSettingsPage -> {
-                markPhysicalActionDispatch(action)
+                val started = markPhysicalActionDispatch(action)
                 val result = DeviceAction.openSettingsPage(context, action.page.name, action.packageName)
-                return if (result.isError) failure(result.message) else success(result.message)
+                val toolResult = if (result.isError) failure(result.message) else success(result.message)
+                return completePhysicalAction(action, started, toolResult, "trusted_intent")
             }
             is UiActionStep.OpenUrl -> {
-                markPhysicalActionDispatch(action)
+                val started = markPhysicalActionDispatch(action)
                 val result = DeviceAction.openUrl(context, action.url)
-                return if (result.isError) failure(result.message) else success(result.message)
+                val toolResult = if (result.isError) failure(result.message) else success(result.message)
+                return completePhysicalAction(action, started, toolResult, "trusted_intent")
             }
             is UiActionStep.ShareText -> {
                 if (action.expectedDestination != null &&
@@ -1237,7 +1273,7 @@ class UiAutomationOrchestrator(
                 ) {
                     return failure("Expected destination must be explicitly present in the user's goal.")
                 }
-                markPhysicalActionDispatch(action)
+                val started = markPhysicalActionDispatch(action)
                 val result = DeviceAction.shareText(context, action.text, "", action.targetPackage)
                 if (!result.isError && action.targetPackage != null && action.expectedDestination != null) {
                     pendingExternalEffect = PendingExternalEffect(
@@ -1246,7 +1282,8 @@ class UiAutomationOrchestrator(
                         contentHash = hashContent(action.text)
                     )
                 }
-                return if (result.isError) failure(result.message) else success(result.message)
+                val toolResult = if (result.isError) failure(result.message) else success(result.message)
+                return completePhysicalAction(action, started, toolResult, "trusted_intent")
             }
             is UiActionStep.OpenCamera -> {
                 val mimeType = if (action.mode == CameraMode.VIDEO) {
@@ -1258,7 +1295,7 @@ class UiAutomationOrchestrator(
                     AutomationMediaManager.createCaptureOutputUri(context, mimeType)
                 }.getOrElse { return failure("Unable to create trusted capture output: ${it.message}") }
                 pendingMediaUris += outputUri
-                markPhysicalActionDispatch(action)
+                val started = markPhysicalActionDispatch(action)
                 val result = if (action.mode == CameraMode.VIDEO) {
                     DeviceAction.recordVideo(context, action.facing.name, outputUri)
                 } else {
@@ -1270,14 +1307,15 @@ class UiAutomationOrchestrator(
                 } else {
                     pendingCapture = PendingCapture(outputUri, mimeType)
                 }
-                return if (result.isError) failure(result.message) else success(result.message)
+                val toolResult = if (result.isError) failure(result.message) else success(result.message)
+                return completePhysicalAction(action, started, toolResult, "trusted_intent")
             }
             is UiActionStep.ShareCapturedMedia -> {
                 val capture = pendingCapture ?: return failure("No captured media is available to share.")
                 val mediaHash = AutomationMediaManager.contentSha256(context, capture.uri)
                     ?: return failure("Unable to hash captured media.")
                 AutomationMediaManager.grantUriReadPermission(context, capture.uri, action.targetPackage)
-                markPhysicalActionDispatch(action)
+                val started = markPhysicalActionDispatch(action)
                 val result = DeviceAction.shareMedia(
                     context = context,
                     uri = capture.uri,
@@ -1291,25 +1329,36 @@ class UiAutomationOrchestrator(
                         contentHash = mediaHash
                     )
                 }
-                return if (result.isError) failure(result.message) else success(result.message)
+                val toolResult = if (result.isError) failure(result.message) else success(result.message)
+                return completePhysicalAction(action, started, toolResult, "trusted_intent")
             }
             else -> return failure("Unsupported executable UI action.")
         }
         val dispatchStartedMs = markPhysicalActionDispatch(action)
         val result = AccessibilityToolHandler.execute(context, ToolCall(toolName, arguments))
             ?: failure("Unknown UI tool: $toolName")
+        completePhysicalAction(action, dispatchStartedMs, result, executionMechanism(action, result))
+        if (!result.isError && isMessagingCommitBoundary(action, currentObservation.screen)) {
+            pendingExternalEffect = null
+        }
+        return result
+    }
+
+    private fun completePhysicalAction(
+        action: UiActionStep,
+        dispatchStartedMs: Long,
+        result: ToolResult,
+        mechanism: String
+    ): ToolResult {
         trace(
             "action_dispatch_completed",
             mapOf(
                 "action" to actionLabel(action),
-                "mechanism" to executionMechanism(action, result),
+                "mechanism" to mechanism,
                 "success" to !result.isError,
                 "latency_ms" to (monotonicNowMs() - dispatchStartedMs)
             )
         )
-        if (!result.isError && isMessagingCommitBoundary(action, currentObservation.screen)) {
-            pendingExternalEffect = null
-        }
         return result
     }
 

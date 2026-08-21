@@ -20,6 +20,24 @@ enum class ActionSessionStatus {
     CANCELLED
 }
 
+internal fun actionStatusForProgress(
+    phase: String,
+    current: ActionSessionStatus
+): ActionSessionStatus {
+    val normalized = phase.trim().lowercase()
+    return when {
+        normalized.startsWith("observe") -> ActionSessionStatus.OBSERVING
+        normalized.startsWith("plan") -> ActionSessionStatus.PLANNING
+        normalized.startsWith("execute") || normalized.startsWith("navigate") ->
+            ActionSessionStatus.EXECUTING
+        normalized.startsWith("verify") || normalized.startsWith("transition") ->
+            ActionSessionStatus.VERIFYING
+        normalized.startsWith("confirm") || normalized.startsWith("needs input") ->
+            ActionSessionStatus.WAITING_FOR_USER
+        else -> current
+    }
+}
+
 data class ActionSessionMetrics(
     val requestReceivedMs: Long = 0L,
     val sessionCreatedMs: Long = 0L,
@@ -50,8 +68,52 @@ data class ActionSessionMetrics(
         "verification_complete_ms" to verificationCompleteMs,
         "next_model_request_ms" to nextModelRequestMs,
         "total_step_latency_ms" to totalStepLatencyMs,
-        "total_session_latency_ms" to totalSessionLatencyMs
+        "total_session_latency_ms" to totalSessionLatencyMs,
+        "invocation_to_first_action_ms" to duration(requestReceivedMs, actionDispatchMs),
+        "model_first_response_latency_ms" to duration(modelRequestStartedMs, modelFirstResponseMs),
+        "model_latency_ms" to duration(modelRequestStartedMs, modelResponseCompleteMs),
+        "action_latency_ms" to duration(actionDispatchMs, actionCompleteMs),
+        "verification_latency_ms" to duration(verificationStartedMs, verificationCompleteMs)
     )
+
+    fun recordRuntimeEvent(
+        name: String,
+        occurredAtMs: Long,
+        fields: Map<String, Any?> = emptyMap()
+    ): ActionSessionMetrics = when (name) {
+        "observation_captured" -> {
+            val workMs = fields.long("capture_ms") + fields.long("index_ms")
+            copy(
+                observationStartedMs = observationStartedMs.takeIf { it > 0L }
+                    ?: (occurredAtMs - workMs).coerceAtLeast(0L),
+                observationReadyMs = occurredAtMs
+            )
+        }
+        "planner_request_started" -> if (modelRequestStartedMs == 0L) {
+            copy(modelRequestStartedMs = occurredAtMs)
+        } else {
+            copy(nextModelRequestMs = occurredAtMs)
+        }
+        "planner_first_response" -> copy(
+            modelFirstResponseMs = modelFirstResponseMs.takeIf { it > 0L } ?: occurredAtMs
+        )
+        "planner_output_received" -> copy(modelResponseCompleteMs = occurredAtMs)
+        "action_dispatch_started" -> copy(
+            actionDispatchMs = actionDispatchMs.takeIf { it > 0L } ?: occurredAtMs
+        )
+        "action_dispatch_completed" -> copy(actionCompleteMs = occurredAtMs)
+        "verification_started" -> copy(
+            verificationStartedMs = verificationStartedMs.takeIf { it > 0L } ?: occurredAtMs
+        )
+        "verification_completed" -> copy(verificationCompleteMs = occurredAtMs)
+        else -> this
+    }
+
+    private fun Map<String, Any?>.long(key: String): Long =
+        (get(key) as? Number)?.toLong()?.coerceAtLeast(0L) ?: 0L
+
+    private fun duration(startMs: Long, endMs: Long): Long =
+        if (startMs > 0L && endMs >= startMs) endMs - startMs else 0L
 }
 
 data class ActionStepRecord(

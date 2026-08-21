@@ -38,14 +38,21 @@ class AutomationTraceTest {
     @Test
     fun recorderEmitsOrderedStructuredEvents() {
         val lines = mutableListOf<String>()
+        val events = mutableListOf<AutomationTraceEvent>()
         var now = 100L
-        val recorder = AutomationTraceRecorder("session-1", lines::add) { now }
+        val recorder = AutomationTraceRecorder(
+            "session-1",
+            lines::add,
+            onEvent = events::add,
+            nowMs = { now }
+        )
 
         recorder.emit("session_started")
         now = 125L
         recorder.emit("action_selected", mapOf("action" to "tap"))
 
         assertEquals(2, lines.size)
+        assertEquals(listOf("session_started", "action_selected"), events.map { it.name })
         val first = JsonParser.parseString(lines[0].removePrefix("UiAutomationTrace ")).asJsonObject
         val second = JsonParser.parseString(lines[1].removePrefix("UiAutomationTrace ")).asJsonObject
         assertEquals(0, first.get("sequence").asInt)

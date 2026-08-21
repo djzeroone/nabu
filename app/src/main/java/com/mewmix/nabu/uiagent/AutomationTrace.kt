@@ -76,6 +76,7 @@ internal data class AutomationTraceEvent(
 internal class AutomationTraceRecorder(
     private val sessionId: String,
     private val logger: (String) -> Unit,
+    private val onEvent: (AutomationTraceEvent) -> Unit = {},
     private val nowMs: () -> Long = System::currentTimeMillis
 ) {
     private val sequence = AtomicInteger(0)
@@ -90,5 +91,6 @@ internal class AutomationTraceRecorder(
             fields = fields
         )
         logger("UiAutomationTrace ${event.toJson()}")
+        onEvent(event)
     }
 }

@@ -38,6 +38,16 @@ object ActionRequestDispatcher {
     private var activeJob: Job? = null
     private val ownership = ActionRequestOwnership()
     private var cachedBackend: Pair<String, LlmBackend>? = null
+    private val metricRuntimeEvents = setOf(
+        "observation_captured",
+        "planner_request_started",
+        "planner_first_response",
+        "planner_output_received",
+        "action_dispatch_started",
+        "action_dispatch_completed",
+        "verification_started",
+        "verification_completed"
+    )
 
     fun submitRequest(
         context: Context,
@@ -78,12 +88,12 @@ object ActionRequestDispatcher {
                     preferredModelId = preferredModelId,
                     requestConfirmation = requestConfirmation,
                     onStep = onStep,
-                    epoch = epoch
-                )
+                epoch = epoch
+            )
                 val published = updateOwned(session.id, epoch) { current ->
                     val endMs = System.currentTimeMillis()
                     val updatedMetrics = current.metrics.copy(
-                        totalSessionLatencyMs = endMs - current.createdAtMs
+                        totalSessionLatencyMs = (endMs - current.metrics.requestReceivedMs).coerceAtLeast(0L)
                     )
                     current.copy(
                         status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
@@ -145,6 +155,9 @@ object ActionRequestDispatcher {
                     current.copy(
                         status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
                         lastVerificationResult = result.output,
+                        metrics = current.metrics.copy(
+                            totalSessionLatencyMs = (endMs - current.metrics.requestReceivedMs).coerceAtLeast(0L)
+                        ),
                         updatedAtMs = endMs
                     )
                 }
@@ -251,15 +264,8 @@ object ActionRequestDispatcher {
             priorTurns = session.turns,
             onProgress = { phase, detail ->
                 updateOwned(session.id, epoch) { current ->
-                    val newStatus = when (phase.lowercase()) {
-                        "observe" -> ActionSessionStatus.OBSERVING
-                        "plan", "planning" -> ActionSessionStatus.PLANNING
-                        "execute", "executing", "navigate" -> ActionSessionStatus.EXECUTING
-                        "verify", "transition" -> ActionSessionStatus.VERIFYING
-                        else -> current.status
-                    }
                     current.copy(
-                        status = newStatus,
+                        status = actionStatusForProgress(phase, current.status),
                         pendingObjective = detail,
                         updatedAtMs = System.currentTimeMillis()
                     )
@@ -275,6 +281,10 @@ object ActionRequestDispatcher {
                         stepHistory = updatedSteps,
                         currentStep = stepRecord.sequence,
                         lastObservedPackage = stepRecord.resultPackage ?: stepRecord.sourcePackage,
+                        lastObservedWindow = stepRecord.resultWindow ?: stepRecord.sourceWindow,
+                        metrics = current.metrics.copy(
+                            totalStepLatencyMs = current.metrics.totalStepLatencyMs + stepRecord.latencyMs
+                        ),
                         updatedAtMs = System.currentTimeMillis()
                     )
                 }
@@ -284,6 +294,21 @@ object ActionRequestDispatcher {
                 }
             },
             externalSessionId = session.id,
+            onRuntimeEvent = { name, _, fields ->
+                if (name in metricRuntimeEvents) {
+                    val occurredAtMs = System.currentTimeMillis()
+                    updateOwned(session.id, epoch) { current ->
+                        current.copy(
+                            metrics = current.metrics.recordRuntimeEvent(
+                                name = name,
+                                occurredAtMs = occurredAtMs,
+                                fields = fields
+                            ),
+                            updatedAtMs = occurredAtMs
+                        )
+                    }
+                }
+            },
             logger = { line ->
                 DebugLogger.log("ActionSession[${session.id.take(8)}]: $line")
             }
