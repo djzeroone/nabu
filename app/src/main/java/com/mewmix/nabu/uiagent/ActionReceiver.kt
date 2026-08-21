@@ -4,9 +4,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.mewmix.nabu.utils.DebugLogger
+import com.mewmix.nabu.BuildConfig
 
 class ActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (!BuildConfig.DEBUG) {
+            DebugLogger.log("ActionReceiver: rejected because the test receiver is debug-only")
+            return
+        }
         if (intent.action == ACTION_EXECUTE) {
             val callingUid = android.os.Binder.getCallingUid()
             val isPrivileged = callingUid == android.os.Process.SHELL_UID ||

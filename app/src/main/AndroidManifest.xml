@@ -197,15 +197,6 @@
                 android:resource="@xml/nabu_voice_widget_info" />
         </receiver>
 
-        <receiver
-            android:name=".uiagent.ActionReceiver"
-            android:permission="android.permission.DUMP"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.mewmix.nabu.ACTION_EXECUTE" />
-            </intent-filter>
-        </receiver>
-
         <service
             android:name=".api.ApiServerBackgroundService"
             android:enabled="true"

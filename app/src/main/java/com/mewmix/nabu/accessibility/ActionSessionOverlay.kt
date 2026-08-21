@@ -391,11 +391,18 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
                     header.visibility = View.GONE
                     handoffBtn.visibility = View.GONE
                     cancelBtn.visibility = View.VISIBLE
+                    params.width = WindowManager.LayoutParams.WRAP_CONTENT
+                    root.setPadding(dp(8f), dp(6f), dp(8f), dp(10f))
+                    card.setPadding(dp(12f), dp(8f), dp(12f), dp(8f))
                 } else {
                     inputRow.visibility = View.VISIBLE
                     header.visibility = View.VISIBLE
                     handoffBtn.visibility = View.VISIBLE
+                    params.width = WindowManager.LayoutParams.MATCH_PARENT
+                    root.setPadding(dp(16f), dp(12f), dp(16f), dp(24f))
+                    card.setPadding(dp(20f), dp(18f), dp(20f), dp(18f))
                 }
+                runCatching { windowManager.updateViewLayout(root, params) }
 
                 statusContainer.visibility = View.VISIBLE
                 val phaseText = when (session.status) {

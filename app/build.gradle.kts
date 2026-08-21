@@ -51,7 +51,9 @@ android {
     buildTypes {
         release {
             val releaseSigning = signingConfigs.getByName("release")
-            signingConfig = if (releaseSigning.storeFile != null) releaseSigning else signingConfigs.getByName("debug")
+            // Never produce a debug-signed "release" APK: it cannot update the preserved device
+            // installation and must not tempt a destructive uninstall/reinstall workaround.
+            signingConfig = releaseSigning.takeIf { it.storeFile != null }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
