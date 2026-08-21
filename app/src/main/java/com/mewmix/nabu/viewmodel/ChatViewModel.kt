@@ -65,6 +65,9 @@ import com.mewmix.nabu.actions.DeviceAction
 import com.mewmix.nabu.uiagent.UiAutomationOrchestrator
 import com.mewmix.nabu.uiagent.AutomationSessionManager
 import com.mewmix.nabu.uiagent.AutomationSessionState
+import com.mewmix.nabu.uiagent.ActionRequestDispatcher
+import com.mewmix.nabu.uiagent.ActionSessionMode
+import com.mewmix.nabu.uiagent.ActionSessionStatus
 import com.mewmix.nabu.uiagent.ControlSurfaceCoordinator
 import com.mewmix.nabu.uiagent.AutomationFlowMode
 import com.mewmix.nabu.uiagent.AutomationFlowStore
@@ -1098,6 +1101,8 @@ class ChatViewModel(
     private val _pendingUiActionConfirmation = MutableStateFlow<UiActionConfirmationRequest?>(null)
     val pendingUiActionConfirmation = _pendingUiActionConfirmation.asStateFlow()
     private var pendingUiActionConfirmationDeferred: CompletableDeferred<Boolean>? = null
+    private var attachedActionSessionId: String? = null
+    private var importedActionSessionId: String? = null
 
     private val _orchestration = MutableStateFlow<OrchestrationUiState?>(null)
     val orchestration = _orchestration.asStateFlow()
@@ -1477,6 +1482,7 @@ class ChatViewModel(
         val image = _pendingImage.value
         val audio = _pendingAudioInput.value
         if (trimmed.isEmpty() && image == null && audio == null) return
+        if (image == null && audio == null && sendAttachedActionFollowUp(trimmed)) return
         if (image == null && audio == null) {
             val waitingSession = AutomationSessionManager.session.value
             val waitingCommand = parseAutomationChatCommand(trimmed)
@@ -2063,9 +2069,11 @@ class ChatViewModel(
     }
 
     fun importActionSession(sessionId: String) {
-        val session = com.mewmix.nabu.uiagent.ActionRequestDispatcher.activeSession.value
-            ?: return
-        if (session.id != sessionId) return
+        val session = ActionRequestDispatcher.activeSession.value ?: return
+        if (session.id != sessionId || session.mode != ActionSessionMode.HANDOFF_TO_CHAT) return
+        attachedActionSessionId = sessionId
+        if (importedActionSessionId == sessionId) return
+        importedActionSessionId = sessionId
         viewModelScope.launch(Dispatchers.Main) {
             if (session.turns.isNotEmpty()) {
                 session.turns.forEach { turn ->
@@ -2084,6 +2092,118 @@ class ChatViewModel(
             }
             persistConversationMessages()
         }
+    }
+
+    /** Routes Chat text into the process-owned action session after an explicit overlay handoff. */
+    private fun sendAttachedActionFollowUp(message: String): Boolean {
+        val sessionId = attachedActionSessionId ?: return false
+        val session = ActionRequestDispatcher.activeSession.value
+        if (session?.id != sessionId || session.mode != ActionSessionMode.HANDOFF_TO_CHAT) {
+            attachedActionSessionId = null
+            return false
+        }
+
+        if (message.equals("stop", ignoreCase = true) ||
+            message.equals("cancel", ignoreCase = true)
+        ) {
+            ActionRequestDispatcher.cancelSession(sessionId)
+            appendImmediateExchange(message, "Stopped the action session.")
+            return true
+        }
+        if (message.equals("status", ignoreCase = true)) {
+            appendImmediateExchange(
+                message,
+                session.lastVerificationResult
+                    ?: "Action session is ${session.status.name.lowercase().replace('_', ' ')}."
+            )
+            return true
+        }
+
+        if (session.status in setOf(
+                ActionSessionStatus.PLANNING,
+                ActionSessionStatus.OBSERVING,
+                ActionSessionStatus.EXECUTING,
+                ActionSessionStatus.VERIFYING,
+                ActionSessionStatus.WAITING_FOR_USER
+            )
+        ) {
+            viewModelScope.launch(Dispatchers.Main) {
+                Toast.makeText(
+                    context,
+                    "The current action is still running. Wait for it to finish or stop it first.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            return true
+        }
+
+        beginSpeechSession(playbackAllowed = false)
+        _chatMessages.value += ChatMessage(message, true)
+        conversationHistory.add(ConversationTurn(ConversationRole.USER, message))
+        _chatMessages.value += ChatMessage("Planning the next action…", false)
+        persistConversationMessages()
+        _isLoading.value = true
+        startOrchestration(
+            title = "Action Session",
+            status = "Planning follow-up",
+            detail = message
+        )
+
+        val submitted = ActionRequestDispatcher.submitFollowUp(
+            context = context.applicationContext,
+            sessionId = sessionId,
+            followUpRequest = message,
+            requestConfirmation = { description ->
+                val deferred = CompletableDeferred<Boolean>()
+                pendingUiActionConfirmationDeferred = deferred
+                _pendingUiActionConfirmation.value = UiActionConfirmationRequest(description)
+                deferred.await()
+            },
+            onStep = { step ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    recordOrchestration(
+                        phase = "Step ${step.sequence}",
+                        detail = step.result,
+                        toolName = UiAutomationOrchestrator.CONTROL_UI_TOOL,
+                        isError = step.verificationStatus == "failed"
+                    )
+                    val last = _chatMessages.value.lastOrNull()
+                    if (last?.isFromUser == false) {
+                        _chatMessages.value = _chatMessages.value.dropLast(1) +
+                            last.copy(message = step.result)
+                    }
+                }
+            },
+            onComplete = { result ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    _isLoading.value = false
+                    finishOrchestration(result.output, result.isError)
+                    val last = _chatMessages.value.lastOrNull()
+                    if (last?.isFromUser == false) {
+                        _chatMessages.value = _chatMessages.value.dropLast(1) +
+                            last.copy(message = result.output)
+                    } else {
+                        _chatMessages.value += ChatMessage(result.output, false)
+                    }
+                    conversationHistory.add(ConversationTurn(ConversationRole.AGENT, result.output))
+                    persistConversationMessages()
+                }
+            }
+        )
+        if (submitted == null) {
+            _isLoading.value = false
+            finishOrchestration("The action session is no longer available.", isError = true)
+            val last = _chatMessages.value.lastOrNull()
+            if (last?.isFromUser == false) {
+                _chatMessages.value = _chatMessages.value.dropLast(1) +
+                    last.copy(message = "The action session is no longer available.")
+            }
+            conversationHistory.add(
+                ConversationTurn(ConversationRole.AGENT, "The action session is no longer available.")
+            )
+            persistConversationMessages()
+        }
+        return true
     }
 
     private fun appendImmediateExchange(userMessage: String, response: String) {

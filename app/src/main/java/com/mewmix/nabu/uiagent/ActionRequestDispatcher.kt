@@ -211,7 +211,6 @@ object ActionRequestDispatcher {
         val intent = Intent(context, ChatActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("extra_handoff_session_id", session.id)
-            putExtra(ChatActivity.EXTRA_INITIAL_PROMPT, session.currentGoal)
         }
         context.startActivity(intent)
     }
