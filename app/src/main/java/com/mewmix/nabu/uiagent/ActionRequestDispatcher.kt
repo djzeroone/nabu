@@ -19,12 +19,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
 object ActionRequestDispatcher {
     private const val TAG = "ActionRequestDispatcher"
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val dispatchMutex = Mutex()
     private val lock = Any()
 
     private val _activeSession = MutableStateFlow<ActionSession?>(null)
@@ -38,6 +41,7 @@ object ActionRequestDispatcher {
         request: String,
         mode: ActionSessionMode = ActionSessionMode.SINGLE_TURN,
         preferredModelId: String? = null,
+        requestConfirmation: (suspend (String) -> Boolean)? = null,
         onStep: ((ActionStepRecord) -> Unit)? = null,
         onComplete: ((ToolResult) -> Unit)? = null
     ): ActionSession {
@@ -50,24 +54,47 @@ object ActionRequestDispatcher {
                 mode = mode,
                 status = ActionSessionStatus.PLANNING,
                 originalGoal = normalized,
-                currentGoal = normalized
-            ).apply {
-                metrics.requestReceivedMs = requestReceivedMs
-                metrics.sessionCreatedMs = System.currentTimeMillis()
-            }
+                currentGoal = normalized,
+                metrics = ActionSessionMetrics(
+                    requestReceivedMs = requestReceivedMs,
+                    sessionCreatedMs = System.currentTimeMillis()
+                )
+            )
             _activeSession.value = newSession
             newSession
         }
 
-        activeJob = scope.launch {
-            val result = executeSessionTurn(context.applicationContext, session, normalized, onStep)
-            synchronized(lock) {
-                session.status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED
-                session.updatedAtMs = System.currentTimeMillis()
-                session.metrics.totalSessionLatencyMs = session.updatedAtMs - session.createdAtMs
-                _activeSession.value = session
+        scope.launch {
+            dispatchMutex.withLock {
+                synchronized(lock) {
+                    activeJob = coroutineContext[Job]
+                }
+                val result = executeSessionTurn(
+                    context = context.applicationContext,
+                    session = session,
+                    goal = normalized,
+                    preferredModelId = preferredModelId,
+                    requestConfirmation = requestConfirmation,
+                    onStep = onStep
+                )
+                synchronized(lock) {
+                    val current = _activeSession.value ?: session
+                    if (current.id == session.id) {
+                        val endMs = System.currentTimeMillis()
+                        val updatedMetrics = current.metrics.copy(
+                            totalSessionLatencyMs = endMs - current.createdAtMs
+                        )
+                        val updatedSession = current.copy(
+                            status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
+                            lastVerificationResult = result.output,
+                            metrics = updatedMetrics,
+                            updatedAtMs = endMs
+                        )
+                        _activeSession.value = updatedSession
+                    }
+                }
+                onComplete?.invoke(result)
             }
-            onComplete?.invoke(result)
         }
 
         return session
@@ -77,6 +104,8 @@ object ActionRequestDispatcher {
         context: Context,
         sessionId: String,
         followUpRequest: String,
+        preferredModelId: String? = null,
+        requestConfirmation: (suspend (String) -> Boolean)? = null,
         onStep: ((ActionStepRecord) -> Unit)? = null,
         onComplete: ((ToolResult) -> Unit)? = null
     ): ActionSession? {
@@ -84,21 +113,43 @@ object ActionRequestDispatcher {
         val session = synchronized(lock) {
             val current = _activeSession.value ?: return null
             if (current.id != sessionId) return null
-            current.currentGoal = normalized
-            current.status = ActionSessionStatus.PLANNING
-            current.updatedAtMs = System.currentTimeMillis()
-            current
+            activeJob?.cancel()
+            val updated = current.copy(
+                currentGoal = normalized,
+                status = ActionSessionStatus.PLANNING,
+                updatedAtMs = System.currentTimeMillis()
+            )
+            _activeSession.value = updated
+            updated
         }
 
-        activeJob?.cancel()
-        activeJob = scope.launch {
-            val result = executeSessionTurn(context.applicationContext, session, normalized, onStep)
-            synchronized(lock) {
-                session.status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED
-                session.updatedAtMs = System.currentTimeMillis()
-                _activeSession.value = session
+        scope.launch {
+            dispatchMutex.withLock {
+                synchronized(lock) {
+                    activeJob = coroutineContext[Job]
+                }
+                val result = executeSessionTurn(
+                    context = context.applicationContext,
+                    session = session,
+                    goal = normalized,
+                    preferredModelId = preferredModelId,
+                    requestConfirmation = requestConfirmation,
+                    onStep = onStep
+                )
+                synchronized(lock) {
+                    val current = _activeSession.value ?: session
+                    if (current.id == sessionId) {
+                        val endMs = System.currentTimeMillis()
+                        val updated = current.copy(
+                            status = if (result.isError) ActionSessionStatus.FAILED else ActionSessionStatus.COMPLETED,
+                            lastVerificationResult = result.output,
+                            updatedAtMs = endMs
+                        )
+                        _activeSession.value = updated
+                    }
+                }
+                onComplete?.invoke(result)
             }
-            onComplete?.invoke(result)
         }
 
         return session
@@ -110,9 +161,11 @@ object ActionRequestDispatcher {
             if (current.id == sessionId) {
                 activeJob?.cancel()
                 activeJob = null
-                current.status = ActionSessionStatus.CANCELLED
-                current.updatedAtMs = System.currentTimeMillis()
-                _activeSession.value = current
+                val updated = current.copy(
+                    status = ActionSessionStatus.CANCELLED,
+                    updatedAtMs = System.currentTimeMillis()
+                )
+                _activeSession.value = updated
                 AutomationSessionManager.cancelActive()
             }
         }
@@ -132,14 +185,25 @@ object ActionRequestDispatcher {
         val session = synchronized(lock) {
             val current = _activeSession.value ?: return
             if (current.id != sessionId) return
-            current.status = ActionSessionStatus.IDLE
-            current
+            // If currently running, suspend execution safely
+            if (current.status in listOf(ActionSessionStatus.PLANNING, ActionSessionStatus.OBSERVING, ActionSessionStatus.EXECUTING, ActionSessionStatus.VERIFYING)) {
+                AutomationSessionManager.suspendActive("Handoff to Chat screen requested by user.")
+            }
+            activeJob?.cancel()
+            activeJob = null
+            val updated = current.copy(
+                status = ActionSessionStatus.IDLE,
+                mode = ActionSessionMode.HANDOFF_TO_CHAT,
+                updatedAtMs = System.currentTimeMillis()
+            )
+            _activeSession.value = updated
+            updated
         }
 
         val intent = Intent(context, ChatActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("extra_handoff_session_id", session.id)
-            putExtra("extra_initial_prompt", session.currentGoal)
+            putExtra(ChatActivity.EXTRA_INITIAL_PROMPT, session.currentGoal)
         }
         context.startActivity(intent)
     }
@@ -148,9 +212,11 @@ object ActionRequestDispatcher {
         context: Context,
         session: ActionSession,
         goal: String,
+        preferredModelId: String?,
+        requestConfirmation: (suspend (String) -> Boolean)?,
         onStep: ((ActionStepRecord) -> Unit)?
     ): ToolResult {
-        val backend = resolveOrInitBackend(context)
+        val backend = resolveOrInitBackend(context, preferredModelId)
             ?: return ToolResult(
                 toolName = UiAutomationOrchestrator.CONTROL_UI_TOOL,
                 output = "No LLM model is downloaded or available for action execution.",
@@ -162,26 +228,48 @@ object ActionRequestDispatcher {
             timestampMs = System.currentTimeMillis()
         )
 
-        var lastRecordedStep: ActionStepRecord? = null
         val orchestrator = UiAutomationOrchestrator(
             context = context,
             backend = backend,
-            requestConfirmation = { true },
+            requestConfirmation = requestConfirmation ?: { prompt ->
+                // If no confirmation requester is provided (e.g. non-interactive background),
+                // reject potentially destructive unconfirmed actions safely.
+                DebugLogger.log("ActionRequestDispatcher: confirmation requested without interactive handler: $prompt")
+                false
+            },
             budget = AutomationBudget(maxExecutedActions = 14),
             isScheduled = false,
+            priorTurns = session.turns,
             onProgress = { phase, detail ->
                 synchronized(lock) {
-                    session.status = when (phase.lowercase()) {
+                    val current = _activeSession.value ?: session
+                    val newStatus = when (phase.lowercase()) {
                         "observe" -> ActionSessionStatus.OBSERVING
                         "plan", "planning" -> ActionSessionStatus.PLANNING
                         "execute", "executing", "navigate" -> ActionSessionStatus.EXECUTING
                         "verify", "transition" -> ActionSessionStatus.VERIFYING
-                        else -> session.status
+                        else -> current.status
                     }
-                    session.pendingObjective = detail
-                    session.updatedAtMs = System.currentTimeMillis()
-                    _activeSession.value = session
+                    val updated = current.copy(
+                        status = newStatus,
+                        pendingObjective = detail,
+                        updatedAtMs = System.currentTimeMillis()
+                    )
+                    _activeSession.value = updated
                 }
+            },
+            onStepRecord = { stepRecord ->
+                synchronized(lock) {
+                    val current = _activeSession.value ?: session
+                    val updatedSteps = current.stepHistory + stepRecord
+                    val updated = current.copy(
+                        stepHistory = updatedSteps,
+                        lastObservedPackage = stepRecord.resultPackage ?: stepRecord.sourcePackage,
+                        updatedAtMs = System.currentTimeMillis()
+                    )
+                    _activeSession.value = updated
+                }
+                onStep?.invoke(stepRecord)
             },
             logger = { line ->
                 DebugLogger.log("ActionSession[${session.id.take(8)}]: $line")
@@ -191,40 +279,62 @@ object ActionRequestDispatcher {
         val result = orchestrator.run(goal)
         val finalTurn = turn.copy(
             assistantResponse = result.output,
+            stepRecords = session.stepHistory,
             isComplete = true,
             isError = result.isError
         )
         synchronized(lock) {
-            session.turns.add(finalTurn)
-            session.lastVerificationResult = result.output
-            session.updatedAtMs = System.currentTimeMillis()
+            val current = _activeSession.value ?: session
+            val updatedTurns = current.turns + finalTurn
+            val updated = current.copy(
+                turns = updatedTurns,
+                lastVerificationResult = result.output,
+                updatedAtMs = System.currentTimeMillis()
+            )
+            _activeSession.value = updated
         }
         return result
     }
 
-    private suspend fun resolveOrInitBackend(context: Context): LlmBackend? = withContext(Dispatchers.IO) {
-        synchronized(lock) {
-            cachedBackend?.let { (id, backend) ->
-                return@withContext backend
-            }
-        }
-
+    private suspend fun resolveOrInitBackend(context: Context, preferredModelId: String?): LlmBackend? = withContext(Dispatchers.IO) {
         val modelManager = ModelManager(context)
         val downloaded = modelManager.models.filter { it.isDownloaded && it.type == ModelType.LLM }
         val remote = OAuthRemoteModels.connectedModels(context)
         val available = (downloaded + remote).distinctBy { it.id }
         if (available.isEmpty()) return@withContext null
 
-        val preferred = preferredRecentModel(context, available) ?: available.first()
-        DebugLogger.log("ActionRequestDispatcher: initializing model ${preferred.id} for action session")
+        val selectedModel = if (!preferredModelId.isNullOrBlank()) {
+            available.firstOrNull { it.id == preferredModelId || it.id.contains(preferredModelId, ignoreCase = true) }
+        } else {
+            // Prioritize fast on-device action models first
+            available.firstOrNull { it.isDownloaded && it.type == ModelType.LLM && (
+                it.id.contains("gemma-4-E2B", ignoreCase = true) ||
+                it.id.contains("qwen", ignoreCase = true) ||
+                it.id.contains("2b", ignoreCase = true) ||
+                it.id.contains("3b", ignoreCase = true)
+            ) } ?: preferredRecentModel(context, available) ?: available.first()
+        } ?: return@withContext null
+
+        synchronized(lock) {
+            cachedBackend?.let { (id, backend) ->
+                if (id == selectedModel.id) {
+                    return@withContext backend
+                } else {
+                    runCatching { backend.close() }
+                    cachedBackend = null
+                }
+            }
+        }
+
+        DebugLogger.log("ActionRequestDispatcher: initializing action model ${selectedModel.id}")
         val created = LlmBackendFactory.create(
             context = context,
-            modelId = preferred.id,
+            modelId = selectedModel.id,
             initializeSynchronously = true
         ) ?: return@withContext null
 
         synchronized(lock) {
-            cachedBackend = preferred.id to created.backend
+            cachedBackend = selectedModel.id to created.backend
         }
         created.backend
     }

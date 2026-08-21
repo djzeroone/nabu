@@ -199,6 +199,7 @@
 
         <receiver
             android:name=".uiagent.ActionReceiver"
+            android:permission="android.permission.DUMP"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.mewmix.nabu.ACTION_EXECUTE" />

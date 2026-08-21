@@ -24,10 +24,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.VolumeOff
@@ -36,9 +35,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -67,8 +68,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import android.widget.Toast
 import android.net.Uri
@@ -79,6 +78,8 @@ import com.mewmix.nabu.chat.LlmImageInput
 import com.mewmix.nabu.chat.ActionTrace
 import com.mewmix.nabu.chat.MessageBubble
 import com.mewmix.nabu.chat.ModelCapabilityResolver
+import com.mewmix.nabu.data.ConversationSummary
+import com.mewmix.nabu.data.Model
 import com.mewmix.nabu.speech.VoiceAttachmentRecorder
 import com.mewmix.nabu.tools.Tool
 import com.mewmix.nabu.tools.ToolRegistry
@@ -98,6 +99,7 @@ import com.mewmix.nabu.ui.components.RuntimeStatusLine
 import com.mewmix.nabu.ui.design.LocalNabuChrome
 import com.mewmix.nabu.utils.TextExtractor
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
@@ -130,7 +132,6 @@ fun ChatScreen(
     val isUiAutomationActive by viewModel.isUiAutomationActive.collectAsState()
     val pendingAutomationQuestion by viewModel.pendingAutomationQuestion.collectAsState()
     val activeModelSupportsAudio = ModelCapabilityResolver.supportsAudioInput(context, activeModel)
-    val clipboardManager = LocalClipboardManager.current
     val voiceRecorder = remember { VoiceAttachmentRecorder(context.applicationContext) }
     var isRecordingVoice by remember { mutableStateOf(false) }
     var startVoiceHandled by remember { mutableStateOf(false) }
@@ -247,15 +248,8 @@ fun ChatScreen(
         }
     }
 
-    val selectedStyles by viewModel.selectedStyles.collectAsState()
-    val weights by viewModel.weights.collectAsState()
-    val interpolationMode by viewModel.interpolationMode.collectAsState()
-    val speed by viewModel.speed.collectAsState()
-    val voiceFavorites by viewModel.voiceFavorites.collectAsState()
-
     val listState = rememberLazyListState()
-    var conversationMenuExpanded by remember { mutableStateOf(false) }
-    var modelMenuExpanded by remember { mutableStateOf(false) }
+    var showSettingsSheet by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<Long?>(null) }
     var renameText by remember { mutableStateOf("") }
     var deleteTarget by remember { mutableStateOf<Long?>(null) }
@@ -263,7 +257,6 @@ fun ChatScreen(
     var toolPrefillMode by remember { mutableStateOf(chatContextMode) }
     var editMessageIndex by remember { mutableStateOf<Int?>(null) }
     var editMessageText by remember { mutableStateOf("") }
-    val activeConversation = conversationSummaries.firstOrNull { it.id == activeConversationId }
 
     LaunchedEffect(chatContextMode) {
         toolPrefillMode = chatContextMode
@@ -392,6 +385,11 @@ fun ChatScreen(
                     .padding(paddingValues),
                 headerTrailing = {
                     BrutalIconButton(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = "Chat settings",
+                        onClick = { showSettingsSheet = true }
+                    )
+                    BrutalIconButton(
                         imageVector = Icons.Filled.Close,
                         contentDescription = "Exit chat",
                         onClick = onExit
@@ -405,380 +403,6 @@ fun ChatScreen(
                 ttsEnabled = ttsEnabled,
                 llmRuntimeDescription = llmRuntimeDescription
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Tools: ${availableTools.count { it.isAvailable }} available",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
-                )
-                BrutalButton(onClick = { showToolPicker = true }) {
-                    Text("View Tools", color = MaterialTheme.colorScheme.onSurface)
-                }
-            }
-
-            BrutalSection(
-                title = "Conversation Settings",
-                expanded = showConversationSettings,
-                onToggle = { viewModel.updateConversationSettingsExpanded(!showConversationSettings) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-            ) {
-                Column {
-                    Text(
-                        text = "Conversation",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        BrutalButton(
-                            onClick = { conversationMenuExpanded = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = conversationSummaries.isNotEmpty()
-                        ) {
-                            Text(
-                                text = activeConversation?.title ?: "No conversations",
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = conversationMenuExpanded,
-                            onDismissRequest = { conversationMenuExpanded = false }
-                        ) {
-                            if (conversationSummaries.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = { Text("No conversations available") },
-                                    onClick = {},
-                                    enabled = false
-                                )
-                            } else {
-                                conversationSummaries.forEach { summary ->
-                                    DropdownMenuItem(
-                                        text = { Text(summary.title) },
-                                        onClick = {
-                                            conversationMenuExpanded = false
-                                            viewModel.selectConversation(summary.id)
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        BrutalButton(onClick = { viewModel.createConversation() }) {
-                            Text("New", color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        BrutalButton(
-                            onClick = {
-                                if (activeConversationId != null) {
-                                    renameText = activeConversation?.title.orEmpty()
-                                    renameTarget = activeConversationId
-                                }
-                            },
-                            enabled = activeConversationId != null
-                        ) {
-                            Text("Rename", color = MaterialTheme.colorScheme.onSurface)
-                        }
-                        BrutalButton(
-                            onClick = {
-                                if (activeConversationId != null) {
-                                    deleteTarget = activeConversationId
-                                }
-                            },
-                            enabled = activeConversationId != null
-                        ) {
-                            Text("Delete", color = MaterialTheme.colorScheme.error)
-                        }
-                        BrutalButton(onClick = { showToolPicker = true }) {
-                            Text("Tools", color = MaterialTheme.colorScheme.onSurface)
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val voiceColor = if (ttsEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
-                        BrutalButton(
-                            onClick = { viewModel.toggleTtsEnabled() },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = if (ttsEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
-                                contentDescription = if (ttsEnabled) "Disable voice playback" else "Enable voice playback",
-                                tint = voiceColor
-                            )
-                        }
-                        BrutalButton(
-                            onClick = { viewModel.stopPlayback() },
-                            enabled = playerState == PlayerState.PLAYING || isSynthesizing
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Stop,
-                                contentDescription = "Stop voice playback",
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Model",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        BrutalButton(
-                            onClick = { modelMenuExpanded = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = availableModels.isNotEmpty()
-                        ) {
-                            Text(
-                                text = activeModel?.name ?: "Select model",
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = modelMenuExpanded,
-                            onDismissRequest = { modelMenuExpanded = false }
-                        ) {
-                            if (availableModels.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = { Text("No models available") },
-                                    onClick = {},
-                                    enabled = false
-                                )
-                            } else {
-                                availableModels.forEach { model ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Column {
-                                                Text(model.name)
-                                                if (model.description.isNotBlank()) {
-                                                    Text(
-                                                        text = model.description,
-                                                        style = MaterialTheme.typography.bodySmall
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        onClick = {
-                                            modelMenuExpanded = false
-                                            viewModel.selectModel(model.id)
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-
-
-            BrutalSection(
-                title = "Model Settings",
-                expanded = showMixerSettings,
-                onToggle = { viewModel.updateModelSettingsExpanded(!showMixerSettings) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-            ) {
-                val systemPrompt by viewModel.systemPrompt.collectAsState()
-                val systemPromptProfiles by viewModel.systemPromptProfiles.collectAsState()
-                val tokenUsage by viewModel.tokenUsage.collectAsState()
-                var promptProfileName by remember { mutableStateOf("") }
-                
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text(
-                        text = "System Prompt",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    TextField(
-                        value = systemPrompt,
-                        onValueChange = { viewModel.updateSystemPrompt(it) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = MaterialTheme.colorScheme.surface,
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface
-                        ),
-                        minLines = 2,
-                        maxLines = 5
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TextField(
-                            value = promptProfileName,
-                            onValueChange = { promptProfileName = it },
-                            label = { Text("Profile name") },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true
-                        )
-                        BrutalButton(
-                            onClick = {
-                                viewModel.saveCurrentSystemPromptProfile(promptProfileName)
-                                promptProfileName = ""
-                            },
-                            enabled = systemPrompt.isNotBlank() && promptProfileName.isNotBlank()
-                        ) {
-                            Text("Save", color = MaterialTheme.colorScheme.onSurface)
-                        }
-                    }
-                    if (systemPromptProfiles.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Prompt Favorites",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        systemPromptProfiles.forEach { profile ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = profile.name,
-                                    modifier = Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                BrutalButton(onClick = { viewModel.applySystemPromptProfile(profile) }) {
-                                    Text("Load", color = MaterialTheme.colorScheme.onSurface)
-                                }
-                                BrutalButton(onClick = { viewModel.deleteSystemPromptProfile(profile.name) }) {
-                                    Text("Delete", color = MaterialTheme.colorScheme.error)
-                                }
-                            }
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text(
-                        text = "Context Mode",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = if (chatContextMode == ChatContextMode.LONG_CONTEXT) {
-                            "Long Context keeps history and uses compaction when the window gets tight."
-                        } else {
-                            "Single Turn only sends the latest user message."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        BrutalButton(
-                            onClick = { viewModel.updateChatContextMode(ChatContextMode.LONG_CONTEXT) },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = if (chatContextMode == ChatContextMode.LONG_CONTEXT) {
-                                    "Long Context On"
-                                } else {
-                                    "Long Context"
-                                },
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        BrutalButton(
-                            onClick = { viewModel.updateChatContextMode(ChatContextMode.SINGLE_TURN) },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = if (chatContextMode == ChatContextMode.SINGLE_TURN) {
-                                    "Single Turn On"
-                                } else {
-                                    "Single Turn"
-                                },
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    Text(
-                        text = "Context Usage",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    val (current, max) = tokenUsage
-                    val usagePercent = if (max > 0) current.toFloat() / max else 0f
-                    LinearProgressIndicator(
-                        progress = { usagePercent },
-                        modifier = Modifier.fillMaxWidth().height(8.dp),
-                        color = if (usagePercent > 0.9f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
-                        trackColor = MaterialTheme.colorScheme.outline,
-                    )
-                    Text(
-                        text = "$current / $max tokens",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.align(Alignment.End)
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Voice Settings", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-
-                    VoiceFavoritesSection(
-                        favorites = voiceFavorites,
-                        onSaveFavorite = viewModel::saveCurrentFavorite,
-                        onApplyFavorite = viewModel::applyFavorite,
-                        onDeleteFavorite = viewModel::deleteFavorite,
-                    )
-                    
-                    StyleSelector(
-                        styleNames = viewModel.styleLoader.names,
-                        selectedStyles = selectedStyles,
-                        onAddStyle = viewModel::addStyle,
-                        onRemoveStyle = viewModel::removeStyle,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    WeightSliders(
-                        selectedStyles = selectedStyles,
-                        weights = weights,
-                        onWeightChanged = viewModel::updateWeight,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    InterpolationModeSelector(
-                        currentMode = interpolationMode,
-                        onModeSelected = viewModel::updateInterpolationMode,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Speed: ${"%.2f".format(speed)}", color = MaterialTheme.colorScheme.onSurface)
-                    BrutalSlider(
-                        value = speed,
-                        onValueChange = { viewModel.updateSpeed(it) },
-                        range = 0.5f..2.0f
-                    )
-                }
-            }
 
             if (isLoading || isSynthesizing || playerState == PlayerState.PLAYING) {
                 val statusText = when {
@@ -824,61 +448,24 @@ fun ChatScreen(
                 contentPadding = PaddingValues(bottom = 18.dp)
             ) {
                 itemsIndexed(chatMessages) { index, chatMessage ->
-                    MessageBubble(chatMessage)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (chatMessage.isFromUser) {
-                            Arrangement.spacedBy(8.dp, Alignment.End)
-                        } else {
-                            Arrangement.spacedBy(8.dp, Alignment.Start)
-                        }
-                    ) {
-                        BrutalIconButton(
-                            imageVector = Icons.Filled.ContentCopy,
-                            contentDescription = "Copy message",
-                            onClick = {
-                                val formatted = chatMessage.message.replace("\\n", "\n").replace("/n", "\n")
-                                clipboardManager.setText(AnnotatedString(formatted))
-                                Toast.makeText(context, "Copied message", Toast.LENGTH_SHORT).show()
-                            },
-                            size = 48.dp
-                        )
-                        BrutalIconButton(
-                            imageVector = Icons.Filled.Edit,
-                            contentDescription = "Edit message",
-                            onClick = {
+                    MessageBubble(
+                        chatMessage = chatMessage,
+                        onEdit = if (!isLoading) {
+                            {
                                 editMessageIndex = index
                                 editMessageText = chatMessage.message.replace("\\n", "\n").replace("/n", "\n")
-                            },
-                            enabled = !isLoading,
-                            size = 48.dp
-                        )
-                        BrutalIconButton(
-                            imageVector = Icons.Filled.Refresh,
-                            contentDescription = "Regenerate response",
-                            onClick = { viewModel.regenerateFrom(index) },
-                            enabled = !isLoading && !isSynthesizing,
-                            size = 48.dp
-                        )
-                        if (!chatMessage.isFromUser) {
-                            BrutalIconButton(
-                                imageVector = Icons.Filled.VolumeUp,
-                                contentDescription = "Replay response",
-                                onClick = { viewModel.replayResponse(index) },
-                                enabled = !isLoading && !isSynthesizing,
-                                size = 48.dp
-                            )
-                        }
-                        if (!chatMessage.isFromUser && chatMessage.actionTrace != null) {
-                            BrutalIconButton(
-                                imageVector = Icons.Filled.Description,
-                                contentDescription = "View action trace",
-                                onClick = { actionTraceToShow = chatMessage.actionTrace },
-                                enabled = !isLoading,
-                                size = 48.dp
-                            )
-                        }
-                    }
+                            }
+                        } else null,
+                        onRegenerate = if (!isLoading && !isSynthesizing) {
+                            { viewModel.regenerateFrom(index) }
+                        } else null,
+                        onReplay = if (!chatMessage.isFromUser && !isLoading && !isSynthesizing) {
+                            { viewModel.replayResponse(index) }
+                        } else null,
+                        onViewTrace = if (chatMessage.actionTrace != null && !isLoading) {
+                            { actionTraceToShow = chatMessage.actionTrace }
+                        } else null
+                    )
                     Spacer(modifier = Modifier.height(8.dp))
                 }
             }
@@ -1158,6 +745,35 @@ fun ChatScreen(
         }
     }
 
+    if (showSettingsSheet) {
+        ModalBottomSheet(onDismissRequest = { showSettingsSheet = false }) {
+            ChatSettingsSheet(
+                viewModel = viewModel,
+                ttsEnabled = ttsEnabled,
+                playerState = playerState,
+                isSynthesizing = isSynthesizing,
+                conversationSummaries = conversationSummaries,
+                activeConversationId = activeConversationId,
+                availableModels = availableModels,
+                activeModel = activeModel,
+                chatContextMode = chatContextMode,
+                onRequestRename = {
+                    if (activeConversationId != null) {
+                        renameText = conversationSummaries
+                            .firstOrNull { it.id == activeConversationId }?.title.orEmpty()
+                        renameTarget = activeConversationId
+                    }
+                },
+                onRequestDelete = {
+                    if (activeConversationId != null) {
+                        deleteTarget = activeConversationId
+                    }
+                },
+                onOpenToolPicker = { showToolPicker = true }
+            )
+        }
+    }
+
     if (renameTarget != null) {
         AlertDialog(
             onDismissRequest = { renameTarget = null },
@@ -1352,6 +968,7 @@ fun ChatScreen(
                                     viewModel.updateChatContextMode(toolPrefillMode)
                                     message = buildToolPrefill(tool)
                                     showToolPicker = false
+                                    showSettingsSheet = false
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -1536,6 +1153,385 @@ private fun OrchestrationModal(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(if (state.isRunning) "Stop" else "Close")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatSettingsSheet(
+    viewModel: ChatViewModel,
+    ttsEnabled: Boolean,
+    playerState: PlayerState,
+    isSynthesizing: Boolean,
+    conversationSummaries: List<ConversationSummary>,
+    activeConversationId: Long?,
+    availableModels: List<Model>,
+    activeModel: Model?,
+    chatContextMode: ChatContextMode,
+    onRequestRename: () -> Unit,
+    onRequestDelete: () -> Unit,
+    onOpenToolPicker: () -> Unit
+) {
+    val showConversationSettings by viewModel.conversationSettingsExpanded.collectAsState()
+    val showMixerSettings by viewModel.modelSettingsExpanded.collectAsState()
+    val selectedStyles by viewModel.selectedStyles.collectAsState()
+    val weights by viewModel.weights.collectAsState()
+    val interpolationMode by viewModel.interpolationMode.collectAsState()
+    val speed by viewModel.speed.collectAsState()
+    val voiceFavorites by viewModel.voiceFavorites.collectAsState()
+    val systemPrompt by viewModel.systemPrompt.collectAsState()
+    val systemPromptProfiles by viewModel.systemPromptProfiles.collectAsState()
+    val tokenUsage by viewModel.tokenUsage.collectAsState()
+    var conversationMenuExpanded by remember { mutableStateOf(false) }
+    var modelMenuExpanded by remember { mutableStateOf(false) }
+    var promptProfileName by remember { mutableStateOf("") }
+    val activeConversation = conversationSummaries.firstOrNull { it.id == activeConversationId }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 24.dp)
+    ) {
+        BrutalSection(
+            title = "Conversation Settings",
+            expanded = showConversationSettings,
+            onToggle = { viewModel.updateConversationSettingsExpanded(!showConversationSettings) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+        ) {
+            Column {
+                Text(
+                    text = "Conversation",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    BrutalButton(
+                        onClick = { conversationMenuExpanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = conversationSummaries.isNotEmpty()
+                    ) {
+                        Text(
+                            text = activeConversation?.title ?: "No conversations",
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = conversationMenuExpanded,
+                        onDismissRequest = { conversationMenuExpanded = false }
+                    ) {
+                        if (conversationSummaries.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("No conversations available") },
+                                onClick = {},
+                                enabled = false
+                            )
+                        } else {
+                            conversationSummaries.forEach { summary ->
+                                DropdownMenuItem(
+                                    text = { Text(summary.title) },
+                                    onClick = {
+                                        conversationMenuExpanded = false
+                                        viewModel.selectConversation(summary.id)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    BrutalButton(onClick = { viewModel.createConversation() }) {
+                        Text("New", color = MaterialTheme.colorScheme.onSurface)
+                    }
+                    BrutalButton(
+                        onClick = onRequestRename,
+                        enabled = activeConversationId != null
+                    ) {
+                        Text("Rename", color = MaterialTheme.colorScheme.onSurface)
+                    }
+                    BrutalButton(
+                        onClick = onRequestDelete,
+                        enabled = activeConversationId != null
+                    ) {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                    }
+                    BrutalButton(onClick = onOpenToolPicker) {
+                        Text("Tools", color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val voiceColor = if (ttsEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                    BrutalButton(
+                        onClick = { viewModel.toggleTtsEnabled() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (ttsEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                            contentDescription = if (ttsEnabled) "Disable voice playback" else "Enable voice playback",
+                            tint = voiceColor
+                        )
+                    }
+                    BrutalButton(
+                        onClick = { viewModel.stopPlayback() },
+                        enabled = playerState == PlayerState.PLAYING || isSynthesizing
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Stop,
+                            contentDescription = "Stop voice playback",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Model",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    BrutalButton(
+                        onClick = { modelMenuExpanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = availableModels.isNotEmpty()
+                    ) {
+                        Text(
+                            text = activeModel?.name ?: "Select model",
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = modelMenuExpanded,
+                        onDismissRequest = { modelMenuExpanded = false }
+                    ) {
+                        if (availableModels.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("No models available") },
+                                onClick = {},
+                                enabled = false
+                            )
+                        } else {
+                            availableModels.forEach { model ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(model.name)
+                                            if (model.description.isNotBlank()) {
+                                                Text(
+                                                    text = model.description,
+                                                    style = MaterialTheme.typography.bodySmall
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        modelMenuExpanded = false
+                                        viewModel.selectModel(model.id)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        BrutalSection(
+            title = "Model Settings",
+            expanded = showMixerSettings,
+            onToggle = { viewModel.updateModelSettingsExpanded(!showMixerSettings) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+        ) {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    text = "System Prompt",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                TextField(
+                    value = systemPrompt,
+                    onValueChange = { viewModel.updateSystemPrompt(it) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                    ),
+                    minLines = 2,
+                    maxLines = 5
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TextField(
+                        value = promptProfileName,
+                        onValueChange = { promptProfileName = it },
+                        label = { Text("Profile name") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    BrutalButton(
+                        onClick = {
+                            viewModel.saveCurrentSystemPromptProfile(promptProfileName)
+                            promptProfileName = ""
+                        },
+                        enabled = systemPrompt.isNotBlank() && promptProfileName.isNotBlank()
+                    ) {
+                        Text("Save", color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+                if (systemPromptProfiles.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Prompt Favorites",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    systemPromptProfiles.forEach { profile ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = profile.name,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            BrutalButton(onClick = { viewModel.applySystemPromptProfile(profile) }) {
+                                Text("Load", color = MaterialTheme.colorScheme.onSurface)
+                            }
+                            BrutalButton(onClick = { viewModel.deleteSystemPromptProfile(profile.name) }) {
+                                Text("Delete", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Context Mode",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (chatContextMode == ChatContextMode.LONG_CONTEXT) {
+                        "Long Context keeps history and uses compaction when the window gets tight."
+                    } else {
+                        "Single Turn only sends the latest user message."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    BrutalButton(
+                        onClick = { viewModel.updateChatContextMode(ChatContextMode.LONG_CONTEXT) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = if (chatContextMode == ChatContextMode.LONG_CONTEXT) {
+                                "Long Context On"
+                            } else {
+                                "Long Context"
+                            },
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    BrutalButton(
+                        onClick = { viewModel.updateChatContextMode(ChatContextMode.SINGLE_TURN) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = if (chatContextMode == ChatContextMode.SINGLE_TURN) {
+                                "Single Turn On"
+                            } else {
+                                "Single Turn"
+                            },
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Context Usage",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                val (current, max) = tokenUsage
+                val usagePercent = if (max > 0) current.toFloat() / max else 0f
+                LinearProgressIndicator(
+                    progress = { usagePercent },
+                    modifier = Modifier.fillMaxWidth().height(8.dp),
+                    color = if (usagePercent > 0.9f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
+                    trackColor = MaterialTheme.colorScheme.outline,
+                )
+                Text(
+                    text = "$current / $max tokens",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.End)
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Voice Settings", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+
+                VoiceFavoritesSection(
+                    favorites = voiceFavorites,
+                    onSaveFavorite = viewModel::saveCurrentFavorite,
+                    onApplyFavorite = viewModel::applyFavorite,
+                    onDeleteFavorite = viewModel::deleteFavorite,
+                )
+
+                StyleSelector(
+                    styleNames = viewModel.styleLoader.names,
+                    selectedStyles = selectedStyles,
+                    onAddStyle = viewModel::addStyle,
+                    onRemoveStyle = viewModel::removeStyle,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                WeightSliders(
+                    selectedStyles = selectedStyles,
+                    weights = weights,
+                    onWeightChanged = viewModel::updateWeight,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                InterpolationModeSelector(
+                    currentMode = interpolationMode,
+                    onModeSelected = viewModel::updateInterpolationMode,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Speed: ${"%.2f".format(speed)}", color = MaterialTheme.colorScheme.onSurface)
+                BrutalSlider(
+                    value = speed,
+                    onValueChange = { viewModel.updateSpeed(it) },
+                    range = 0.5f..2.0f
+                )
             }
         }
     }

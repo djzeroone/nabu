@@ -21,20 +21,20 @@ enum class ActionSessionStatus {
 }
 
 data class ActionSessionMetrics(
-    var requestReceivedMs: Long = 0L,
-    var sessionCreatedMs: Long = 0L,
-    var observationStartedMs: Long = 0L,
-    var observationReadyMs: Long = 0L,
-    var modelRequestStartedMs: Long = 0L,
-    var modelFirstResponseMs: Long = 0L,
-    var modelResponseCompleteMs: Long = 0L,
-    var actionDispatchMs: Long = 0L,
-    var actionCompleteMs: Long = 0L,
-    var verificationStartedMs: Long = 0L,
-    var verificationCompleteMs: Long = 0L,
-    var nextModelRequestMs: Long = 0L,
-    var totalStepLatencyMs: Long = 0L,
-    var totalSessionLatencyMs: Long = 0L
+    val requestReceivedMs: Long = 0L,
+    val sessionCreatedMs: Long = 0L,
+    val observationStartedMs: Long = 0L,
+    val observationReadyMs: Long = 0L,
+    val modelRequestStartedMs: Long = 0L,
+    val modelFirstResponseMs: Long = 0L,
+    val modelResponseCompleteMs: Long = 0L,
+    val actionDispatchMs: Long = 0L,
+    val actionCompleteMs: Long = 0L,
+    val verificationStartedMs: Long = 0L,
+    val verificationCompleteMs: Long = 0L,
+    val nextModelRequestMs: Long = 0L,
+    val totalStepLatencyMs: Long = 0L,
+    val totalSessionLatencyMs: Long = 0L
 ) {
     fun toMap(): Map<String, Long> = mapOf(
         "request_received_ms" to requestReceivedMs,
@@ -82,19 +82,19 @@ data class ActionConversationTurn(
 data class ActionSession(
     val id: String = UUID.randomUUID().toString(),
     val mode: ActionSessionMode = ActionSessionMode.SINGLE_TURN,
-    var status: ActionSessionStatus = ActionSessionStatus.IDLE,
+    val status: ActionSessionStatus = ActionSessionStatus.IDLE,
     val originalGoal: String,
-    var currentGoal: String = originalGoal,
-    var currentStep: Int = 0,
-    val turns: MutableList<ActionConversationTurn> = mutableListOf(),
-    val stepHistory: MutableList<ActionStepRecord> = mutableListOf(),
-    var pendingObjective: String? = null,
-    var lastObservedPackage: String? = null,
-    var lastObservedWindow: String? = null,
-    var lastVerificationResult: String? = null,
+    val currentGoal: String = originalGoal,
+    val currentStep: Int = 0,
+    val turns: List<ActionConversationTurn> = emptyList(),
+    val stepHistory: List<ActionStepRecord> = emptyList(),
+    val pendingObjective: String? = null,
+    val lastObservedPackage: String? = null,
+    val lastObservedWindow: String? = null,
+    val lastVerificationResult: String? = null,
     val metrics: ActionSessionMetrics = ActionSessionMetrics(),
     val createdAtMs: Long = System.currentTimeMillis(),
-    var updatedAtMs: Long = System.currentTimeMillis()
+    val updatedAtMs: Long = System.currentTimeMillis()
 ) {
     fun toHandoffMap(): Map<String, String> = mapOf(
         "session_id" to id,

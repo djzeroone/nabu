@@ -114,8 +114,12 @@ class NabuAccessibilityService : AccessibilityService() {
                 lastObservedPackage = packageName
                 lastObservedFingerprint = snapshot.stateFingerprint
             } else {
-                if (lastObservationId != null && lastObservedPackage != null && lastObservedPackage != packageName) {
-                    clearActionLeaseLocked()
+                if (lastObservationId != null) {
+                    val packageChanged = lastObservedPackage != null && lastObservedPackage != packageName
+                    val fingerprintChanged = lastObservedFingerprint != null && lastObservedFingerprint != snapshot.stateFingerprint
+                    if (packageChanged || fingerprintChanged) {
+                        clearActionLeaseLocked()
+                    }
                 }
             }
             snapshot
@@ -255,10 +259,13 @@ class NabuAccessibilityService : AccessibilityService() {
     fun performUiAction(action: String, params: JSONObject): JSONObject = synchronized(observationLock) {
         val observationId = params.optString("observation_id").trim()
         require(observationId.isNotEmpty()) { "observation_id is required." }
+        if (lastObservationId == null || observationId != lastObservationId) {
+            throw IllegalStateException("Action observation lease is stale or invalid (expected $lastObservationId, got $observationId).")
+        }
         val window = targetWindow()
         val root = window?.root ?: rootInActiveWindow ?: throw IllegalStateException("No active application window is available.")
         val currentPackage = root.packageName?.toString().orEmpty()
-        if (lastObservedPackage != null && currentPackage != lastObservedPackage) {
+        if (lastObservedPackage == null || currentPackage != lastObservedPackage) {
             throw IllegalStateException("Active package changed since observation ($lastObservedPackage -> $currentPackage).")
         }
         clearActionLeaseLocked()

@@ -8,6 +8,15 @@ import com.mewmix.nabu.utils.DebugLogger
 class ActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == ACTION_EXECUTE) {
+            val callingUid = android.os.Binder.getCallingUid()
+            val isPrivileged = callingUid == android.os.Process.SHELL_UID ||
+                callingUid == android.os.Process.ROOT_UID ||
+                callingUid == android.os.Process.myUid()
+            if (!isPrivileged) {
+                DebugLogger.log("ActionReceiver: rejected broadcast from unauthorized uid $callingUid")
+                return
+            }
+
             val request = intent.getStringExtra(EXTRA_REQUEST)?.trim().orEmpty()
             if (request.isBlank()) {
                 DebugLogger.log("ActionReceiver: received empty request")
@@ -15,7 +24,7 @@ class ActionReceiver : BroadcastReceiver() {
             }
             val modeStr = intent.getStringExtra(EXTRA_MODE)?.uppercase() ?: "SINGLE_TURN"
             val mode = runCatching { ActionSessionMode.valueOf(modeStr) }.getOrDefault(ActionSessionMode.SINGLE_TURN)
-            DebugLogger.log("ActionReceiver: dispatching request='$request' mode=$mode")
+            DebugLogger.log("ActionReceiver: dispatching request='$request' mode=$mode from uid=$callingUid")
             ActionRequestDispatcher.submitRequest(
                 context = context,
                 request = request,

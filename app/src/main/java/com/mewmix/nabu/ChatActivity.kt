@@ -232,6 +232,11 @@ class ChatActivity : ComponentActivity() {
             }
         }
 
+        val handoffSessionId = intent.getStringExtra("extra_handoff_session_id")
+        if (!handoffSessionId.isNullOrBlank()) {
+            viewModel.importActionSession(handoffSessionId)
+        }
+
         lifecycleScope.launch {
             ControlSurfaceCoordinator.parkRequest.collect { sessionId ->
                 if (sessionId == null) return@collect

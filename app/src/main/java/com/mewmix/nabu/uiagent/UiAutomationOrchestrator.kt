@@ -33,8 +33,10 @@ class UiAutomationOrchestrator(
     private val requestConfirmation: suspend (String) -> Boolean,
     private val budget: AutomationBudget = AutomationBudget(),
     private val isScheduled: Boolean = false,
+    private val priorTurns: List<ActionConversationTurn> = emptyList(),
     private val onProgress: (phase: String, detail: String) -> Unit = { _, _ -> },
     private val onModelOutput: (String) -> Unit = {},
+    private val onStepRecord: ((ActionStepRecord) -> Unit)? = null,
     private val onUserQuestion: suspend (String) -> Unit = {},
     private val onUserQuestionCleared: suspend () -> Unit = {},
     private val logger: (String) -> Unit = {}
@@ -256,6 +258,7 @@ class UiAutomationOrchestrator(
 
         val executionResult = run execution@ {
             repeat(budget.maxExecutedActions) { actionIndex ->
+            val stepStartMs = monotonicNowMs()
             val directiveWaitStartedMs = monotonicNowMs()
             when (val directive = AutomationSessionManager.awaitDirective(sessionId)) {
                 AutomationSessionDirective.Cancel ->
@@ -707,6 +710,20 @@ class UiAutomationOrchestrator(
                 sessionId,
                 "${actionLabel(action)}: ${observation.screen.packageName} → ${next.screen.packageName}"
             )
+            val stepRecord = ActionStepRecord(
+                sequence = actionIndex + 1,
+                observation = observation.screen.screenId,
+                reasoningSummary = actionLabel(action),
+                action = actionLabel(action),
+                target = getTargetLabel(action, observation.screen),
+                result = if (postconditionFailed) "failed" else "succeeded",
+                postActionObservation = next.screen.screenId,
+                verification = postconditionDetail,
+                latencyMs = monotonicNowMs() - stepStartMs,
+                sourcePackage = observation.screen.packageName,
+                resultPackage = next.screen.packageName
+            )
+            onStepRecord?.invoke(stepRecord)
             UiGoalCompletionEvaluator.evaluate(goal, next.screen, goalAppCandidates)?.let { completion ->
                 trace(
                     "goal_condition_satisfied",
@@ -1330,6 +1347,16 @@ class UiAutomationOrchestrator(
                 add("success_conditions", JsonArray().apply {
                     successConditions.forEach(::add)
                 })
+            }
+            if (priorTurns.isNotEmpty()) {
+                val turnsArray = JsonArray()
+                priorTurns.takeLast(4).forEach { turn ->
+                    turnsArray.add(JsonObject().apply {
+                        addProperty("user_goal", turn.userRequest)
+                        turn.assistantResponse?.let { addProperty("assistant_summary", it) }
+                    })
+                }
+                add("prior_turns", turnsArray)
             }
             if (history.isNotEmpty()) {
                 val recentEntries = history.takeLast(8)

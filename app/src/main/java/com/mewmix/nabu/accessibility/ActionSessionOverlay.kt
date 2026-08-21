@@ -1,27 +1,28 @@
 package com.mewmix.nabu.accessibility
 
 import android.content.Context
-import android.graphics.Color
-import android.graphics.PixelFormat
+import android.content.res.ColorStateList
+import android.content.res.Configuration
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.content.res.ResourcesCompat
+import com.mewmix.nabu.R
+import com.mewmix.nabu.ui.theme.AppTheme
 import com.mewmix.nabu.uiagent.ActionRequestDispatcher
-import com.mewmix.nabu.uiagent.ActionSession
 import com.mewmix.nabu.uiagent.ActionSessionMode
 import com.mewmix.nabu.uiagent.ActionSessionStatus
-import com.mewmix.nabu.utils.DebugLogger
+import com.mewmix.nabu.utils.ThemeManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,12 +30,72 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
+/**
+ * Visual tokens resolved from the active [ThemeManager] theme (Bubble Pop, Brutal, or custom)
+ * so the overlay always matches the in-app chat chrome.
+ */
+private data class OverlayPalette(
+    val surface: Int,
+    val onSurface: Int,
+    val onSurfaceVariant: Int,
+    val surfaceVariant: Int,
+    val outline: Int,
+    val primary: Int,
+    val onPrimary: Int,
+    val primaryContainer: Int,
+    val onPrimaryContainer: Int,
+    val secondary: Int,
+    val error: Int,
+    val panelRadiusDp: Float,
+    val controlRadiusDp: Float,
+    val borderWidthDp: Float,
+    val titleTypeface: Typeface?,
+    val bodyTypeface: Typeface?
+) {
+    companion object {
+        fun resolve(context: Context): OverlayPalette {
+            val nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+            val theme: AppTheme = ThemeManager.getTheme(context, nightMode == Configuration.UI_MODE_NIGHT_YES)
+            return OverlayPalette(
+                surface = theme.surface.toInt(),
+                onSurface = theme.onSurface.toInt(),
+                onSurfaceVariant = theme.onSurfaceVariant.toInt(),
+                surfaceVariant = theme.surfaceVariant.toInt(),
+                outline = theme.outline.toInt(),
+                primary = theme.primary.toInt(),
+                onPrimary = theme.onPrimary.toInt(),
+                primaryContainer = theme.primaryContainer.toInt(),
+                onPrimaryContainer = theme.onPrimaryContainer.toInt(),
+                secondary = theme.secondary.toInt(),
+                error = 0xFFD0563F.toInt(),
+                panelRadiusDp = theme.panelRadiusDp ?: 24f,
+                controlRadiusDp = theme.controlRadiusDp ?: 18f,
+                borderWidthDp = theme.borderWidthDp ?: 1f,
+                titleTypeface = ResourcesCompat.getFont(context, R.font.quicksand_bold),
+                bodyTypeface = ResourcesCompat.getFont(context, R.font.quicksand_regular)
+            )
+        }
+    }
+}
+
 class ActionSessionOverlay(private val service: NabuAccessibilityService) {
     private val windowManager = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var overlayView: View? = null
     private var observerJob: Job? = null
     private var currentMode: ActionSessionMode = ActionSessionMode.SINGLE_TURN
+    private var palette: OverlayPalette = OverlayPalette.resolve(service)
+
+    private fun dp(value: Float): Int = (value * service.resources.displayMetrics.density).toInt()
+
+    private fun chipBackground(fill: Int, radiusDp: Float, strokeColor: Int? = null, strokeWidthDp: Float = 0f) =
+        GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = radiusDp * service.resources.displayMetrics.density
+            if (strokeColor != null && strokeWidthDp > 0f) {
+                setStroke(dp(strokeWidthDp), strokeColor)
+            }
+        }
 
     fun show() {
         if (overlayView != null) {
@@ -42,24 +103,23 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
             return
         }
 
+        palette = OverlayPalette.resolve(service)
+        val p = palette
+
         val root = FrameLayout(service).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            setPadding(24, 24, 24, 48)
+            setPadding(dp(16f), dp(12f), dp(16f), dp(24f))
         }
 
         val card = LinearLayout(service).apply {
             orientation = LinearLayout.VERTICAL
-            val density = service.resources.displayMetrics.density
-            val bg = GradientDrawable().apply {
-                setColor(0xEE121212.toInt())
-                cornerRadius = 16f * density
-                setStroke((1.5f * density).toInt(), 0x44FFFFFF.toInt())
-            }
-            background = bg
-            setPadding((16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt(), (16 * density).toInt())
+            // Mostly-opaque surface so underlying app content stays legible at the edges.
+            val cardColor = (p.surface and 0x00FFFFFF) or (0xF6 shl 24)
+            background = chipBackground(cardColor, p.panelRadiusDp, p.outline, p.borderWidthDp)
+            setPadding(dp(20f), dp(18f), dp(20f), dp(18f))
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -75,24 +135,31 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = 16
+                bottomMargin = dp(12f)
             }
         }
 
         val title = TextView(service).apply {
-            text = "NABU ACTION ASSISTANT"
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 13f
-            typeface = android.graphics.Typeface.MONOSPACE
+            text = "Nabu Assistant"
+            setTextColor(p.onSurface)
+            textSize = 16f
+            typeface = p.titleTypeface ?: Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val modeToggle = Button(service).apply {
+        val modeToggle = TextView(service).apply {
             text = if (currentMode == ActionSessionMode.SINGLE_TURN) "Single-Turn" else "Conversation"
-            textSize = 11f
-            setTextColor(0xFF00E5FF.toInt())
-            setBackgroundColor(0x00000000)
-            setPadding(12, 4, 12, 4)
+            textSize = 12f
+            setTextColor(p.onPrimaryContainer)
+            typeface = p.bodyTypeface ?: Typeface.DEFAULT
+            background = chipBackground(p.primaryContainer, 999f)
+            setPadding(dp(14f), dp(6f), dp(14f), dp(6f))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(8f)
+            }
             setOnClickListener {
                 currentMode = if (currentMode == ActionSessionMode.SINGLE_TURN) {
                     ActionSessionMode.TEMPORARY_CONVERSATION
@@ -103,12 +170,11 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
             }
         }
 
-        val closeBtn = Button(service).apply {
+        val closeBtn = TextView(service).apply {
             text = "✕"
-            textSize = 14f
-            setTextColor(0xFFAAAAAA.toInt())
-            setBackgroundColor(0x00000000)
-            setPadding(8, 0, 8, 0)
+            textSize = 16f
+            setTextColor(p.onSurfaceVariant)
+            setPadding(dp(8f), dp(4f), dp(8f), dp(4f))
             setOnClickListener { hide() }
         }
 
@@ -125,25 +191,27 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = 16
+                bottomMargin = dp(12f)
             }
         }
 
         val statusText = TextView(service).apply {
             text = "Ready"
-            setTextColor(0xFF00E5FF.toInt())
+            setTextColor(p.primary)
             textSize = 13f
-            typeface = android.graphics.Typeface.MONOSPACE
+            typeface = p.bodyTypeface ?: Typeface.DEFAULT
         }
 
         val progressBar = ProgressBar(service, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(p.primary)
+            progressTintList = ColorStateList.valueOf(p.primary)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                8
+                dp(6f)
             ).apply {
-                topMargin = 8
-                bottomMargin = 8
+                topMargin = dp(8f)
+                bottomMargin = dp(8f)
             }
         }
 
@@ -156,12 +224,19 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
             )
         }
 
-        val handoffBtn = Button(service).apply {
+        val handoffBtn = TextView(service).apply {
             text = "Open in Nabu ↗"
-            textSize = 11f
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0x33FFFFFF.toInt())
-            setPadding(16, 8, 16, 8)
+            textSize = 12f
+            setTextColor(p.onPrimaryContainer)
+            typeface = p.bodyTypeface ?: Typeface.DEFAULT
+            background = chipBackground(p.primaryContainer, p.controlRadiusDp, p.primary, p.borderWidthDp)
+            setPadding(dp(14f), dp(8f), dp(14f), dp(8f))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(8f)
+            }
             setOnClickListener {
                 ActionRequestDispatcher.activeSession.value?.let { session ->
                     ActionRequestDispatcher.handoffToChat(service, session.id)
@@ -170,12 +245,13 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
             }
         }
 
-        val cancelBtn = Button(service).apply {
+        val cancelBtn = TextView(service).apply {
             text = "Stop"
-            textSize = 11f
-            setTextColor(0xFFFF5252.toInt())
-            setBackgroundColor(0x00000000)
-            setPadding(16, 8, 16, 8)
+            textSize = 12f
+            setTextColor(p.error)
+            typeface = p.bodyTypeface ?: Typeface.DEFAULT
+            background = chipBackground(0x00000000, p.controlRadiusDp, p.error, p.borderWidthDp)
+            setPadding(dp(14f), dp(8f), dp(14f), dp(8f))
             setOnClickListener {
                 ActionRequestDispatcher.activeSession.value?.let { session ->
                     ActionRequestDispatcher.cancelSession(session.id)
@@ -203,36 +279,27 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
 
         val inputField = EditText(service).apply {
             hint = "Ask Nabu to do something..."
-            setHintTextColor(0x88AAAAAA.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 14f
+            setHintTextColor(p.onSurfaceVariant)
+            setTextColor(p.onSurface)
+            textSize = 15f
             maxLines = 3
-            val density = service.resources.displayMetrics.density
-            val fieldBg = GradientDrawable().apply {
-                setColor(0x44222222.toInt())
-                cornerRadius = 8f * density
-                setStroke((1f * density).toInt(), 0x33FFFFFF.toInt())
-            }
-            background = fieldBg
-            setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+            typeface = p.bodyTypeface ?: Typeface.DEFAULT
+            background = chipBackground(p.surfaceVariant, p.controlRadiusDp, p.outline, p.borderWidthDp)
+            setPadding(dp(14f), dp(12f), dp(14f), dp(12f))
             imeOptions = EditorInfo.IME_ACTION_SEND
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = 12
+                marginEnd = dp(10f)
             }
         }
 
-        val submitBtn = Button(service).apply {
+        val submitBtn = TextView(service).apply {
             text = "Run"
-            textSize = 13f
-            setTextColor(0xFF000000.toInt())
-            val density = service.resources.displayMetrics.density
-            val btnBg = GradientDrawable().apply {
-                setColor(0xFF00E5FF.toInt())
-                cornerRadius = 8f * density
-            }
-            background = btnBg
-            setPadding((16 * density).toInt(), (8 * density).toInt(), (16 * density).toInt(), (8 * density).toInt())
+            textSize = 14f
+            setTextColor(p.onPrimary)
+            typeface = p.titleTypeface ?: Typeface.DEFAULT_BOLD
+            background = chipBackground(p.primary, p.controlRadiusDp)
+            setPadding(dp(18f), dp(12f), dp(18f), dp(12f))
         }
 
         fun doSubmit() {
@@ -277,12 +344,28 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
             type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
             flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            format = PixelFormat.TRANSLUCENT
+            format = android.graphics.PixelFormat.TRANSLUCENT
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         }
 
         windowManager.addView(root, params)
         overlayView = root
+
+        // Gentle rise-in so the panel feels like it belongs to the same surface language as the app.
+        card.translationY = dp(20f).toFloat()
+        card.alpha = 0f
+        card.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(180L)
+            .start()
+
+        fun statusColor(status: ActionSessionStatus): Int = when (status) {
+            ActionSessionStatus.COMPLETED -> p.secondary
+            ActionSessionStatus.FAILED -> p.error
+            ActionSessionStatus.CANCELLED, ActionSessionStatus.IDLE -> p.onSurfaceVariant
+            else -> p.primary
+        }
 
         observerJob?.cancel()
         observerJob = scope.launch {
@@ -290,7 +373,28 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
                 if (session == null) {
                     statusContainer.visibility = View.GONE
                     statusText.text = ""
+                    inputRow.visibility = View.VISIBLE
+                    header.visibility = View.VISIBLE
                     return@collectLatest
+                }
+
+                val isRunning = session.status in listOf(
+                    ActionSessionStatus.PLANNING,
+                    ActionSessionStatus.OBSERVING,
+                    ActionSessionStatus.EXECUTING,
+                    ActionSessionStatus.VERIFYING
+                )
+
+                // Collapse input row during active execution to prevent obstruction
+                if (isRunning) {
+                    inputRow.visibility = View.GONE
+                    header.visibility = View.GONE
+                    handoffBtn.visibility = View.GONE
+                    cancelBtn.visibility = View.VISIBLE
+                } else {
+                    inputRow.visibility = View.VISIBLE
+                    header.visibility = View.VISIBLE
+                    handoffBtn.visibility = View.VISIBLE
                 }
 
                 statusContainer.visibility = View.VISIBLE
@@ -305,11 +409,8 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
                     else -> session.status.name
                 }
                 statusText.text = phaseText
-                progressBar.visibility = if (session.status in listOf(ActionSessionStatus.PLANNING, ActionSessionStatus.OBSERVING, ActionSessionStatus.EXECUTING, ActionSessionStatus.VERIFYING)) {
-                    View.VISIBLE
-                } else {
-                    View.GONE
-                }
+                statusText.setTextColor(statusColor(session.status))
+                progressBar.visibility = if (isRunning) View.VISIBLE else View.GONE
 
                 if (session.status == ActionSessionStatus.COMPLETED && session.mode == ActionSessionMode.SINGLE_TURN) {
                     // In single-turn mode, hide overlay shortly after verified success

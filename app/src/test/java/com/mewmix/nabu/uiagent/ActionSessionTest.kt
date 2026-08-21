@@ -23,34 +23,27 @@ class ActionSessionTest {
     }
 
     @Test
-    fun actionSession_tracksConversationTurnsAndMetrics() {
-        val session = ActionSession(
+    fun actionSession_tracksConversationTurnsAndMetricsImmutably() {
+        val initialSession = ActionSession(
             originalGoal = "Open Settings",
             mode = ActionSessionMode.TEMPORARY_CONVERSATION
         )
 
-        session.metrics.requestReceivedMs = 1000L
-        session.metrics.observationReadyMs = 1050L
-        session.metrics.modelResponseCompleteMs = 1200L
-        session.metrics.actionCompleteMs = 1250L
-        session.metrics.verificationCompleteMs = 1300L
-        session.metrics.totalStepLatencyMs = 300L
-        session.metrics.totalSessionLatencyMs = 300L
-
-        val metricsMap = session.metrics.toMap()
-        assertEquals(1000L, metricsMap["request_received_ms"])
-        assertEquals(1050L, metricsMap["observation_ready_ms"])
-        assertEquals(1200L, metricsMap["model_response_complete_ms"])
-        assertEquals(1250L, metricsMap["action_complete_ms"] ?: 0L)
-        assertEquals(1300L, metricsMap["verification_complete_ms"])
-        assertEquals(300L, metricsMap["total_session_latency_ms"])
+        val metrics = ActionSessionMetrics(
+            requestReceivedMs = 1000L,
+            observationReadyMs = 1050L,
+            modelResponseCompleteMs = 1200L,
+            actionCompleteMs = 1250L,
+            verificationCompleteMs = 1300L,
+            totalStepLatencyMs = 300L,
+            totalSessionLatencyMs = 300L
+        )
 
         val turn = ActionConversationTurn(
             userRequest = "Open Settings",
             assistantResponse = "Settings opened.",
             isComplete = true
         )
-        session.turns.add(turn)
 
         val step = ActionStepRecord(
             sequence = 1,
@@ -65,24 +58,38 @@ class ActionSessionTest {
             sourcePackage = "com.mewmix.nabu",
             resultPackage = "com.android.settings"
         )
-        session.stepHistory.add(step)
+
+        val session = initialSession.copy(
+            metrics = metrics,
+            turns = listOf(turn),
+            stepHistory = listOf(step),
+            status = ActionSessionStatus.COMPLETED
+        )
+
+        val metricsMap = session.metrics.toMap()
+        assertEquals(1000L, metricsMap["request_received_ms"])
+        assertEquals(1050L, metricsMap["observation_ready_ms"])
+        assertEquals(1200L, metricsMap["model_response_complete_ms"])
+        assertEquals(1250L, metricsMap["action_complete_ms"] ?: 0L)
+        assertEquals(1300L, metricsMap["verification_complete_ms"])
+        assertEquals(300L, metricsMap["total_session_latency_ms"])
 
         assertEquals(1, session.turns.size)
         assertEquals(1, session.stepHistory.size)
         assertEquals("Settings opened.", session.turns.first().assistantResponse)
         assertEquals("open_app com.android.settings", session.stepHistory.first().action)
+        assertEquals(ActionSessionStatus.COMPLETED, session.status)
     }
 
     @Test
-    fun actionSession_generatesHandoffMap() {
+    fun actionSession_generatesHandoffMapAndBundle() {
         val session = ActionSession(
             originalGoal = "Search for Agent Junkies in Telegram",
-            mode = ActionSessionMode.TEMPORARY_CONVERSATION
-        ).apply {
-            pendingObjective = "Open chat"
-            lastObservedPackage = "org.telegram.messenger.web"
+            mode = ActionSessionMode.TEMPORARY_CONVERSATION,
+            pendingObjective = "Open chat",
+            lastObservedPackage = "org.telegram.messenger.web",
             lastVerificationResult = "Search completed"
-        }
+        )
 
         val map = session.toHandoffMap()
         assertEquals(session.id, map["session_id"])

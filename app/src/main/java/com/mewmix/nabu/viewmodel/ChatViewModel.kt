@@ -2062,6 +2062,30 @@ class ChatViewModel(
         }
     }
 
+    fun importActionSession(sessionId: String) {
+        val session = com.mewmix.nabu.uiagent.ActionRequestDispatcher.activeSession.value
+            ?: return
+        if (session.id != sessionId) return
+        viewModelScope.launch(Dispatchers.Main) {
+            if (session.turns.isNotEmpty()) {
+                session.turns.forEach { turn ->
+                    _chatMessages.value += ChatMessage(turn.userRequest, true)
+                    conversationHistory.add(ConversationTurn(ConversationRole.USER, turn.userRequest))
+                    val responseText = turn.assistantResponse ?: "Completed action."
+                    _chatMessages.value += ChatMessage(responseText, false)
+                    conversationHistory.add(ConversationTurn(ConversationRole.AGENT, responseText))
+                }
+            } else {
+                _chatMessages.value += ChatMessage(session.originalGoal, true)
+                conversationHistory.add(ConversationTurn(ConversationRole.USER, session.originalGoal))
+                val summary = session.lastVerificationResult ?: "Action session started."
+                _chatMessages.value += ChatMessage(summary, false)
+                conversationHistory.add(ConversationTurn(ConversationRole.AGENT, summary))
+            }
+            persistConversationMessages()
+        }
+    }
+
     private fun appendImmediateExchange(userMessage: String, response: String) {
         val image = _pendingImage.value
         val audio = _pendingAudioInput.value
