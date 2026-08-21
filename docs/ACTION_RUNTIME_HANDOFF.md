@@ -86,6 +86,16 @@ Files: `ActionSession.kt`, `ActionRequestDispatcher.kt`, and working-memory test
 Invariant established: the process session retains at most 8 recent turns and 64 global step
 receipts; each turn contains only the steps from that turn rather than cumulative copies.
 
+### `ec33353` — Publish action lifecycle and latency metrics
+
+Files: dispatcher/session state, automation trace/orchestrator, and timing/trace tests.
+
+Invariant established: numbered progress phases publish the correct immutable lifecycle state;
+package and window checkpoints are retained; observation, model request/first response/completion,
+first action, action completion, verification, step, and workflow boundaries flow from the live
+orchestrator into `ActionSessionMetrics`. Typed Android actions emit the same dispatch-completion
+boundary as Accessibility actions.
+
 ## ARCHITECTURE
 
 - **ActionSession:** immutable `StateFlow` snapshots owned process-wide by
@@ -121,7 +131,9 @@ receipts; each turn contains only the steps from that turn rather than cumulativ
   current observation. Raw coordinate/custom mechanisms do not bypass confirmation.
 - **Tracing:** records action family, semantic action, mechanism, verification status, source and
   result windows, model boundaries, action dispatch/completion, verification, first-action, step,
-  and workflow latency fields.
+  and workflow latency fields. These events also update the immutable session snapshot; derived
+  first-action, first-response, model, action, and verification durations are exposed by
+  `ActionSessionMetrics.toMap()`.
 
 ## ACTION SURFACE
 
@@ -154,20 +166,20 @@ channel itself.
 - Installed and candidate certificate SHA-256:
   `ff63128ba761b251d8c8e045280b136f6e5ccb9cd16185ad8fbc738d0c23bd89`.
 - Final candidate and pulled installed APK SHA-256:
-  `ff54779459bed60405280f3d4bbca6d03d260a352d4ccce8851854506fadc6ba`.
+  `ba07d68f36ac93018b28070d45a61e045ace0402316892cadf6295f878938e81`.
 - Build: `./gradlew app:assembleRelease --no-daemon` — PASS (minified/R8).
 - Update: `adb install -r app/build/outputs/apk/release/app-release.apk` — SUCCESS.
 - `firstInstallTime` remained `2026-06-28 10:04:19`; final `lastUpdateTime` is
-  `2026-08-21 00:08:32`; data remains `/data/user/0/com.mewmix.nabu`.
+  `2026-08-21 00:20:25`; data remains `/data/user/0/com.mewmix.nabu`.
 - `READ_CONTACTS`, `RECORD_AUDIO`, `READ_MEDIA_AUDIO`, and `POST_NOTIFICATIONS` remain granted.
 - No uninstall, `pm clear`, or differently signed/debug APK was used.
 - Production manifest/package inspection contains no `ActionReceiver` or `ACTION_EXECUTE`.
-- Final cold launch: PASS, `MainActivity`, 524 ms; recent logs contained no fatal Nabu crash.
+- Final cold launch: PASS, `MainActivity`, 464 ms; recent logs contained no fatal Nabu crash.
 
 ## TESTS
 
 - `./gradlew :app:compileDebugKotlin :app:testDebugUnitTest --no-daemon`: PASS.
-- Actual JUnit XML totals: **294 tests, 0 failures, 0 errors, 0 skipped**.
+- Actual JUnit XML totals: **296 tests, 0 failures, 0 errors, 0 skipped**.
 - Coverage added for observation leases, capability-sensitive fingerprints, action-catalog/raw-ID
   invariants, compact snapshot projection, bounded gestures, validators, postcondition verifier,
   dispatcher ownership, bounded contextual memory, and the private assistant/tile entry fallback.
@@ -185,7 +197,7 @@ ActionSession ID.
 | Scenario | Starting state / entry | Session ID | Result and evidence | Latency | Status |
 |---|---|---:|---|---:|---|
 | Same-signer in-place update | Existing release with user data; `adb install -r` | N/A | Candidate signer matched installed signer; install succeeded; first-install time, data directory, and grants preserved | N/A | PASS |
-| Release cold launch | Updated package stopped; explicit MainActivity launch | N/A | Activity status `ok`; no matching fatal crash | 524 ms | PASS |
+| Release cold launch | Updated package stopped; explicit MainActivity launch | N/A | Activity status `ok`; no matching fatal crash | 464 ms | PASS |
 | Production receiver hardening | Final release APK/package inspection | N/A | No `ActionReceiver`/`ACTION_EXECUTE` entry | N/A | PASS |
 | Quick Settings entry | Shell requested the real tile service while Accessibility was disabled | N/A | Command returned without error, but the tile was not added/listening and MainActivity remained foreground; no fallback claim made | Not measured | NOT VERIFIED |
 | Tap through stale-state rejection | Accessibility disabled | Not created | Runtime correctly cannot observe/act | Not measured | BLOCKED |
@@ -209,7 +221,7 @@ timestamps. Invocation-to-first-action is derived from request receipt to first 
 
 No honest live first-action/model/action/verification/workflow distributions or model-call and
 recovery counts are available because Accessibility was disabled. Cold application launch was
-524 ms; this is not action-runtime latency and must not be used as such.
+464 ms; this is not action-runtime latency and must not be used as such.
 
 ## FOUND / NOT FIXED
 
