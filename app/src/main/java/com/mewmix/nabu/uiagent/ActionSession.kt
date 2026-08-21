@@ -128,3 +128,19 @@ data class ActionSession(
         putInt("turn_count", turns.size)
     }
 }
+
+/** Keeps process-lifetime action memory useful without allowing a long conversation to grow forever. */
+object ActionSessionWorkingMemory {
+    const val MAX_RECENT_TURNS = 8
+    const val MAX_RECENT_STEPS = 64
+
+    fun appendStep(
+        history: List<ActionStepRecord>,
+        step: ActionStepRecord
+    ): List<ActionStepRecord> = (history + step).takeLast(MAX_RECENT_STEPS)
+
+    fun appendTurn(
+        history: List<ActionConversationTurn>,
+        turn: ActionConversationTurn
+    ): List<ActionConversationTurn> = (history + turn).takeLast(MAX_RECENT_TURNS)
+}

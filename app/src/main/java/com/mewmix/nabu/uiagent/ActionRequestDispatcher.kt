@@ -235,6 +235,7 @@ object ActionRequestDispatcher {
             userRequest = goal,
             timestampMs = System.currentTimeMillis()
         )
+        val turnSteps = mutableListOf<ActionStepRecord>()
 
         val orchestrator = UiAutomationOrchestrator(
             context = context,
@@ -266,14 +267,21 @@ object ActionRequestDispatcher {
             },
             onStepRecord = { stepRecord ->
                 val published = updateOwned(session.id, epoch) { current ->
-                    val updatedSteps = current.stepHistory + stepRecord
+                    val updatedSteps = ActionSessionWorkingMemory.appendStep(
+                        current.stepHistory,
+                        stepRecord
+                    )
                     current.copy(
                         stepHistory = updatedSteps,
+                        currentStep = stepRecord.sequence,
                         lastObservedPackage = stepRecord.resultPackage ?: stepRecord.sourcePackage,
                         updatedAtMs = System.currentTimeMillis()
                     )
                 }
-                if (published) onStep?.invoke(stepRecord)
+                if (published) {
+                    turnSteps += stepRecord
+                    onStep?.invoke(stepRecord)
+                }
             },
             externalSessionId = session.id,
             logger = { line ->
@@ -285,11 +293,11 @@ object ActionRequestDispatcher {
         updateOwned(session.id, epoch) { current ->
             val finalTurn = turn.copy(
                 assistantResponse = result.output,
-                stepRecords = current.stepHistory,
+                stepRecords = turnSteps.toList(),
                 isComplete = true,
                 isError = result.isError
             )
-            val updatedTurns = current.turns + finalTurn
+            val updatedTurns = ActionSessionWorkingMemory.appendTurn(current.turns, finalTurn)
             current.copy(
                 turns = updatedTurns,
                 lastVerificationResult = result.output,
