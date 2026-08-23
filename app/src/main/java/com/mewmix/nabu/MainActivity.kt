@@ -153,6 +153,11 @@ class MyApplication : Application() {
         ApiServerManager.stop()
         super.onTerminate()
     }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        com.mewmix.nabu.uiagent.ActionRequestDispatcher.onTrimMemory(level)
+    }
 }
 
 class MainActivity : ComponentActivity() {

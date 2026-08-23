@@ -8,6 +8,7 @@ import org.xml.sax.InputSource
 
 import com.mewmix.nabu.accessibility.UiSnapshot
 import com.mewmix.nabu.accessibility.UiNode
+import com.mewmix.nabu.accessibility.ObservedNodeIdentity
 
 object UiTreeIndexer {
     private val boundsPattern = Regex("""\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]""")
@@ -22,13 +23,16 @@ object UiTreeIndexer {
                 node.boundsInScreen.right,
                 node.boundsInScreen.bottom
             )
-            val id = stableElementId(
+            val id = ObservedNodeIdentity.compute(
                 node.packageName,
                 node.resourceId.takeIf { it.isNotBlank() },
                 node.text.takeIf { it.isNotBlank() },
                 node.contentDescription.takeIf { it.isNotBlank() },
                 node.className.takeIf { it.isNotBlank() },
-                bounds,
+                bounds.left,
+                bounds.top,
+                bounds.right,
+                bounds.bottom,
                 node.treePath
             )
             indexed += UiElement(
@@ -86,19 +90,13 @@ object UiTreeIndexer {
         snapshot.rootNode?.let { visit(it, null) }
 
         val resolvedPackage = snapshot.packageName
-        val screenId = stableHash(
-            listOf(
-                resolvedPackage,
-                "", // activityName
-                indexed.joinToString("|") {
-                    "${it.id}:${it.enabled}:${it.visible}:${it.checked}:${it.focused}:${it.selected}:" +
-                        "${it.text.orEmpty()}:${it.standardActions.sorted()}:" +
-                        "${it.customActions.map { action -> action.ref + ':' + action.label }}:${it.range}:" +
-                        "${it.accessibilityFocused}:${it.selectionStart}:${it.selectionEnd}:${it.collection}:${it.collectionItem}"
-                }
-            ).joinToString("\u001f")
+        return UiScreenState(
+            screenId = snapshot.stateFingerprint,
+            packageName = resolvedPackage,
+            activityName = null,
+            elements = indexed,
+            systemActions = snapshot.systemActions
         )
-        return UiScreenState(screenId, resolvedPackage, null, indexed, snapshot.systemActions)
     }
 
     fun parse(
@@ -130,13 +128,16 @@ object UiTreeIndexer {
             val resourceId = element.attributeOrNull("resource-id")
                 ?: element.attributeOrNull("view-id")
             val className = element.attributeOrNull("class")
-            val id = stableElementId(
+            val id = ObservedNodeIdentity.compute(
                 nodePackage,
                 resourceId,
                 text,
                 contentDescription,
                 className,
-                bounds,
+                bounds?.left,
+                bounds?.top,
+                bounds?.right,
+                bounds?.bottom,
                 path
             )
             indexed += UiElement(
@@ -200,26 +201,6 @@ object UiTreeIndexer {
         )
         return UiScreenState(screenId, resolvedPackage, activityName, indexed)
     }
-
-    private fun stableElementId(
-        packageName: String?,
-        resourceId: String?,
-        text: String?,
-        contentDescription: String?,
-        className: String?,
-        bounds: UiBounds?,
-        treePath: String
-    ): String = "e_" + stableHash(
-        listOf(
-            packageName,
-            resourceId,
-            text,
-            contentDescription,
-            className,
-            bounds?.toList()?.joinToString(","),
-            treePath
-        ).joinToString("\u001f") { it.orEmpty() }
-    )
 
     private fun stableHash(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())

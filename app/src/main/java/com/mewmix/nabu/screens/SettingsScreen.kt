@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +62,8 @@ import android.content.Intent
 import android.net.Uri
 import com.mewmix.nabu.data.ModelManager
 import com.mewmix.nabu.data.ModelType
+import com.mewmix.nabu.data.OAuthRemoteModels
+import com.mewmix.nabu.uiagent.ActionRequestDispatcher
 import com.mewmix.nabu.supertonic.SupertonicLanguages
 import java.text.DateFormat
 import java.util.Date
@@ -85,6 +88,17 @@ fun SettingsScreen(
     var ttsEngine by remember { mutableStateOf(storedTtsEngine) }
     var expanded by remember { mutableStateOf(false) }
     val modelManager = remember { ModelManager(context) }
+    val availableActionModels = remember {
+        (modelManager.models.filter { it.type == ModelType.LLM && it.isDownloaded } +
+            OAuthRemoteModels.connectedModels(context.applicationContext))
+            .distinctBy { it.id }
+    }
+    var actionModelId by remember { mutableStateOf(SettingsManager.getActionModelId(context)) }
+    var actionModelExpanded by remember { mutableStateOf(false) }
+    var keepActionModelReady by remember {
+        mutableStateOf(SettingsManager.keepActionModelReady(context))
+    }
+    val actionModelLifecycle by ActionRequestDispatcher.actionModelLifecycle.collectAsState()
     // Only Supertonic models should appear in Supertonic selector
     val supertonicModels = modelManager.models.filter { it.type == ModelType.TTS && it.id.startsWith("supertonic") }
     val ttsEngineOptions = listOf("kokoro", "supertonic", "soprano")
@@ -137,6 +151,7 @@ fun SettingsScreen(
     var customBorderWidth by remember { mutableStateOf(formatThemeNumber(customThemeDraft.borderWidthDp ?: 1f)) }
     var customThemeError by remember { mutableStateOf<String?>(null) }
     var appearanceExpanded by remember { mutableStateOf(false) }
+    var actionRuntimeExpanded by remember { mutableStateOf(false) }
     var diagnosticsExpanded by remember { mutableStateOf(false) }
     var speechRuntimeExpanded by remember { mutableStateOf(false) }
     var llamaExpanded by remember { mutableStateOf(false) }
@@ -431,6 +446,86 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+
+            BrutalSection(
+                title = "Action Runtime",
+                expanded = actionRuntimeExpanded,
+                onToggle = { actionRuntimeExpanded = !actionRuntimeExpanded }
+            ) {
+                ExposedDropdownMenuBox(
+                    expanded = actionModelExpanded,
+                    onExpandedChange = { actionModelExpanded = it }
+                ) {
+                    val selectedLabel = availableActionModels
+                        .firstOrNull { it.id == actionModelId }
+                        ?.name
+                        ?: actionModelId
+                        ?: "Automatic (fast model policy)"
+                    TextField(
+                        value = selectedLabel,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Action Model") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = actionModelExpanded)
+                        },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    DropdownMenu(
+                        expanded = actionModelExpanded,
+                        onDismissRequest = { actionModelExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Automatic (fast model policy)") },
+                            onClick = {
+                                actionModelId = null
+                                SettingsManager.setActionModelId(context, null)
+                                ActionRequestDispatcher.onActionModelSettingsChanged(context)
+                                actionModelExpanded = false
+                            }
+                        )
+                        availableActionModels.forEach { model ->
+                            DropdownMenuItem(
+                                text = { Text(model.name) },
+                                onClick = {
+                                    actionModelId = model.id
+                                    SettingsManager.setActionModelId(context, model.id)
+                                    ActionRequestDispatcher.onActionModelSettingsChanged(context)
+                                    actionModelExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                SwitchToggle(
+                    checked = keepActionModelReady,
+                    onToggle = { enabled ->
+                        keepActionModelReady = enabled
+                        SettingsManager.setKeepActionModelReady(context, enabled)
+                        ActionRequestDispatcher.onActionModelSettingsChanged(context)
+                    },
+                    label = "Keep Action Model ready"
+                )
+
+                Text(
+                    text = buildString {
+                        append("State: ")
+                        append(actionModelLifecycle.phase.name.lowercase().replace('_', ' '))
+                        actionModelLifecycle.modelId?.let { append(" · ").append(it) }
+                        actionModelLifecycle.initializationMs?.takeIf { it > 0L }?.let {
+                            append(" · warmed in ").append(it).append(" ms")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "When enabled, Nabu warms the selected model in the background while Accessibility is connected and keeps it for ten minutes after recent action use.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             BrutalSection(

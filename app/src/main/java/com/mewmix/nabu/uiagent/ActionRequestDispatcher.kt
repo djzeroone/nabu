@@ -24,12 +24,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import java.util.UUID
 
 object ActionRequestDispatcher {
     private const val TAG = "ActionRequestDispatcher"
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val dispatchMutex = Mutex()
+    private val backendMutex = Mutex()
     private val lock = Any()
 
     private val _activeSession = MutableStateFlow<ActionSession?>(null)
@@ -38,6 +40,10 @@ object ActionRequestDispatcher {
     private var activeJob: Job? = null
     private val ownership = ActionRequestOwnership()
     private var cachedBackend: Pair<String, LlmBackend>? = null
+    private var idleUnloadJob: Job? = null
+    private var accessibilityConnected = false
+    private val _actionModelLifecycle = MutableStateFlow(ActionModelLifecycleState())
+    val actionModelLifecycle = _actionModelLifecycle.asStateFlow()
     private val metricRuntimeEvents = setOf(
         "observation_captured",
         "planner_request_started",
@@ -58,6 +64,7 @@ object ActionRequestDispatcher {
         onStep: ((ActionStepRecord) -> Unit)? = null,
         onComplete: ((ToolResult) -> Unit)? = null
     ): ActionSession {
+        cancelIdleUnload()
         val requestReceivedMs = System.currentTimeMillis()
         val normalized = request.trim()
         val (session, epoch) = synchronized(lock) {
@@ -103,6 +110,7 @@ object ActionRequestDispatcher {
                     )
                 }
                 synchronized(lock) { if (isOwnerLocked(session.id, epoch)) activeJob = null }
+                retainOrUnloadAfterSession(context.applicationContext)
                 if (published) onComplete?.invoke(result)
             }
         }
@@ -123,6 +131,7 @@ object ActionRequestDispatcher {
         onStep: ((ActionStepRecord) -> Unit)? = null,
         onComplete: ((ToolResult) -> Unit)? = null
     ): ActionSession? {
+        cancelIdleUnload()
         val normalized = followUpRequest.trim()
         val (session, epoch) = synchronized(lock) {
             val current = _activeSession.value ?: return null
@@ -162,6 +171,7 @@ object ActionRequestDispatcher {
                     )
                 }
                 synchronized(lock) { if (isOwnerLocked(session.id, epoch)) activeJob = null }
+                retainOrUnloadAfterSession(context.applicationContext)
                 if (published) onComplete?.invoke(result)
             }
         }
@@ -197,6 +207,50 @@ object ActionRequestDispatcher {
                 activeJob?.cancel()
                 activeJob = null
                 _activeSession.value = null
+            }
+        }
+    }
+
+    fun onAccessibilityConnectionChanged(context: Context, connected: Boolean) {
+        synchronized(lock) { accessibilityConnected = connected }
+        if (connected && SettingsManager.keepActionModelReady(context)) {
+            cancelIdleUnload()
+            warmActionModel(context, "accessibility_connected")
+        } else {
+            scheduleIdleUnload(context.applicationContext, ACTION_MODEL_IDLE_TIMEOUT_MS)
+        }
+    }
+
+    fun onActionModelSettingsChanged(context: Context) {
+        val appContext = context.applicationContext
+        scope.launch {
+            dispatchMutex.withLock {
+                closeCachedBackend("settings_changed")
+                if (SettingsManager.keepActionModelReady(appContext) &&
+                    synchronized(lock) { accessibilityConnected }
+                ) {
+                    resolveOrInitBackend(appContext, preferredModelId = null)
+                }
+            }
+        }
+    }
+
+    fun warmActionModel(context: Context, reason: String = "requested") {
+        if (!SettingsManager.keepActionModelReady(context)) return
+        val appContext = context.applicationContext
+        scope.launch {
+            dispatchMutex.withLock {
+                DebugLogger.log("$TAG: warming Action Model reason=$reason")
+                resolveOrInitBackend(appContext, preferredModelId = null)
+            }
+        }
+    }
+
+    fun onTrimMemory(level: Int) {
+        if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
+        scope.launch {
+            dispatchMutex.withLock {
+                closeCachedBackend("memory_pressure_$level")
             }
         }
     }
@@ -350,7 +404,13 @@ object ActionRequestDispatcher {
         true
     }
 
-    private suspend fun resolveOrInitBackend(context: Context, preferredModelId: String?): LlmBackend? = withContext(Dispatchers.IO) {
+    private suspend fun resolveOrInitBackend(context: Context, preferredModelId: String?): LlmBackend? =
+        backendMutex.withLock { resolveOrInitBackendLocked(context, preferredModelId) }
+
+    private suspend fun resolveOrInitBackendLocked(
+        context: Context,
+        preferredModelId: String?
+    ): LlmBackend? = withContext(Dispatchers.IO) {
         val modelManager = ModelManager(context)
         val downloaded = modelManager.models.filter { it.isDownloaded && it.type == ModelType.LLM }
         val remote = OAuthRemoteModels.connectedModels(context)
@@ -376,9 +436,19 @@ object ActionRequestDispatcher {
             return@withContext null
         }
 
+        _actionModelLifecycle.value = ActionModelLifecycleState(
+            phase = ActionModelLifecyclePhase.SELECTED,
+            modelId = selectedModel.id
+        )
+
         synchronized(lock) {
             cachedBackend?.let { (id, backend) ->
                 if (id == selectedModel.id) {
+                    _actionModelLifecycle.value = ActionModelLifecycleState(
+                        phase = ActionModelLifecyclePhase.READY,
+                        modelId = id,
+                        initializationMs = 0L
+                    )
                     return@withContext backend
                 } else {
                     runCatching { backend.close() }
@@ -388,16 +458,82 @@ object ActionRequestDispatcher {
         }
 
         DebugLogger.log("ActionRequestDispatcher: initializing action model ${selectedModel.id}")
+        _actionModelLifecycle.value = ActionModelLifecycleState(
+            phase = ActionModelLifecyclePhase.WARMING,
+            modelId = selectedModel.id
+        )
+        val initializationStartedMs = System.nanoTime() / 1_000_000L
         val created = LlmBackendFactory.create(
             context = context,
             modelId = selectedModel.id,
             initializeSynchronously = true
-        ) ?: return@withContext null
+        ) ?: run {
+            _actionModelLifecycle.value = ActionModelLifecycleState(
+                phase = ActionModelLifecyclePhase.FAILED,
+                modelId = selectedModel.id,
+                reason = "backend_initialization_failed"
+            )
+            return@withContext null
+        }
+
+        val initializationMs = (System.nanoTime() / 1_000_000L - initializationStartedMs)
+            .coerceAtLeast(0L)
 
         synchronized(lock) {
             cachedBackend = selectedModel.id to created.backend
         }
+        _actionModelLifecycle.value = ActionModelLifecycleState(
+            phase = ActionModelLifecyclePhase.READY,
+            modelId = selectedModel.id,
+            initializationMs = initializationMs
+        )
+        DebugLogger.log("$TAG: Action Model ready model=${selectedModel.id} initializationMs=$initializationMs")
         created.backend
+    }
+
+    private fun retainOrUnloadAfterSession(context: Context) {
+        if (synchronized(lock) { accessibilityConnected } &&
+            SettingsManager.keepActionModelReady(context)
+        ) {
+            cancelIdleUnload()
+        } else {
+            scheduleIdleUnload(context, ACTION_MODEL_IDLE_TIMEOUT_MS)
+        }
+    }
+
+    private fun scheduleIdleUnload(context: Context, delayMs: Long) {
+        synchronized(lock) {
+            idleUnloadJob?.cancel()
+            idleUnloadJob = scope.launch {
+                delay(delayMs)
+                dispatchMutex.withLock {
+                    val shouldRemainWarm = synchronized(lock) { accessibilityConnected } &&
+                        SettingsManager.keepActionModelReady(context)
+                    if (!shouldRemainWarm) closeCachedBackend("idle_timeout")
+                }
+            }
+        }
+    }
+
+    private fun cancelIdleUnload() {
+        synchronized(lock) {
+            idleUnloadJob?.cancel()
+            idleUnloadJob = null
+        }
+    }
+
+    private suspend fun closeCachedBackend(reason: String) = backendMutex.withLock {
+        val cached = synchronized(lock) {
+            cachedBackend.also { cachedBackend = null }
+        }
+        cached?.let { (modelId, backend) ->
+            runCatching { backend.close() }
+            DebugLogger.log("$TAG: unloaded Action Model model=$modelId reason=$reason")
+        }
+        _actionModelLifecycle.value = ActionModelLifecycleState(
+            phase = ActionModelLifecyclePhase.UNLOADED,
+            reason = reason
+        )
     }
 
     private fun preferredRecentModel(context: Context, available: List<Model>): Model? {
@@ -412,4 +548,6 @@ object ActionRequestDispatcher {
             }
         return null
     }
+
+    private const val ACTION_MODEL_IDLE_TIMEOUT_MS = 10 * 60 * 1_000L
 }

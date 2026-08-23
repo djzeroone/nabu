@@ -10,6 +10,12 @@ import java.io.File
 import java.util.UUID
 
 object AccessibilityToolHandler {
+    data class ControlPlaneProbe(
+        val serviceReady: Boolean,
+        val snapshot: UiSnapshot?,
+        val failure: String? = null
+    )
+
     private val ACCESSIBILITY_TOOLS = setOf(
         "observe_ui",
         "read_screen",
@@ -36,7 +42,7 @@ object AccessibilityToolHandler {
      * Callers must run this before parking Chat or opening another task. A successful probe proves
      * both that Android has bound the service and that it can lease a real accessibility snapshot.
      */
-    fun controlPlaneFailure(context: Context): String? {
+    fun probeControlPlane(context: Context): ControlPlaneProbe {
         val service = NabuAccessibilityService.instance
         if (service == null) {
             val manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
@@ -46,22 +52,30 @@ object AccessibilityToolHandler {
                     info.resolveInfo.serviceInfo.packageName == context.packageName &&
                         info.resolveInfo.serviceInfo.name == NabuAccessibilityService::class.java.name
                 } == true
-            return if (enabledByAndroid) {
+            val failure = if (enabledByAndroid) {
                 "Nabu Accessibility Service is enabled but has not connected yet. " +
                     "Keep Nabu open for a moment or toggle the service off and on, then invoke device control again. " +
                     "The current screen was not changed."
             } else {
                 "Nabu Accessibility Service is disabled. Enable Nabu in Android Settings > " +
-                    "Accessibility, then invoke device control again. The current screen was not changed."
+                "Accessibility, then invoke device control again. The current screen was not changed."
             }
+            return ControlPlaneProbe(serviceReady = false, snapshot = null, failure = failure)
         }
-        if (service.forceCaptureSnapshot() == null) {
-            return "Nabu Accessibility Service is connected, but Android did not expose a readable active window. " +
+        val snapshot = service.forceCaptureSnapshot()
+        if (snapshot == null) {
+            return ControlPlaneProbe(
+                serviceReady = true,
+                snapshot = null,
+                failure = "Nabu Accessibility Service is connected, but Android did not expose a readable active window. " +
                 "Keep the device awake and unlocked, then invoke device control again. " +
                 "The current screen was not changed."
+            )
         }
-        return null
+        return ControlPlaneProbe(serviceReady = true, snapshot = snapshot)
     }
+
+    fun controlPlaneFailure(context: Context): String? = probeControlPlane(context).failure
 
     val TOOLS = listOf(
         com.mewmix.nabu.tools.Tool(

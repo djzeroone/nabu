@@ -103,7 +103,8 @@ class UiAutomationOrchestrator(
                     terminalResult = it
                 }
             }
-            AccessibilityToolHandler.controlPlaneFailure(context)?.let { detail ->
+            val controlPlaneProbe = AccessibilityToolHandler.probeControlPlane(context)
+            controlPlaneProbe.failure?.let { detail ->
                 logger("UiAutomation preflight failed before takeover: $detail")
                 trace.emit(
                     "session_preflight_failed",
@@ -114,7 +115,8 @@ class UiAutomationOrchestrator(
 
             AutomationSessionManager.begin(context, sessionId, goal)
             trace.emit("session_started")
-            if (!isScheduled && ControlSurfaceCoordinator.isChatForegrounded) {
+            val mustParkChat = !isScheduled && ControlSurfaceCoordinator.isChatForegrounded
+            if (mustParkChat) {
                 progress("Take over", "Parking Chat after acquiring the device-control channel")
                 val acknowledged = ControlSurfaceCoordinator.parkAndAwait(sessionId, timeoutMs = 800L)
                 trace.emit(
@@ -122,7 +124,11 @@ class UiAutomationOrchestrator(
                     mapOf("acknowledged" to acknowledged)
                 )
             }
-            runWithCleanup(goal, sessionId).also { result ->
+            runWithCleanup(
+                initialGoal = goal,
+                sessionId = sessionId,
+                initialSnapshot = controlPlaneProbe.snapshot.takeUnless { mustParkChat }
+            ).also { result ->
                 terminalResult = result
                 trace.emit(
                     "session_finished",
@@ -158,7 +164,11 @@ class UiAutomationOrchestrator(
         }
     }
 
-    private suspend fun runWithCleanup(initialGoal: String, sessionId: String): ToolResult {
+    private suspend fun runWithCleanup(
+        initialGoal: String,
+        sessionId: String,
+        initialSnapshot: com.mewmix.nabu.accessibility.UiSnapshot?
+    ): ToolResult {
         var goal = initialGoal
         if (goal.isBlank()) return failure("UI automation goal is blank.")
         when (val directive = AutomationSessionManager.awaitDirective(sessionId)) {
@@ -171,22 +181,20 @@ class UiAutomationOrchestrator(
             return failure("UI automation requires the device to be awake and unlocked.")
         }
         progress("Observe", "Capturing the active window and accessibility tree")
-        var observation = observeInitial()
+        var observation = observeInitial(initialSnapshot)
             ?: return failure(
                 "Nabu lost its accessibility control plane while Android was switching windows. " +
                     "Return to Nabu and invoke device control again."
             )
 
-        deterministicNavigationAction(goal)?.let { action ->
+        DirectSemanticActionResolver.resolve(goal, observation.screen)?.let { action ->
             progress("Execute", "Running ${actionLabel(action)} without model inference")
             val actionPlan = UiActionPlan(goal, observation.screen.screenId, listOf(action))
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> return failure(decision.reason)
                 is UiPlanDecision.Block -> return failure(decision.reason)
-                is UiPlanDecision.RequireConfirmation -> {
-                    return failure("Unexpected confirmation requirement for ${actionLabel(action)}.")
-                }
+                is UiPlanDecision.RequireConfirmation -> Unit // execute() owns the bound JIT prompt.
             }
             val result = execute(action, observation, sessionId, goal)
             if (result.isError) return result
@@ -778,9 +786,7 @@ class UiAutomationOrchestrator(
         return executionResult
     }
 
-    private suspend fun observe(
-        requestScreenshot: Boolean = false
-    ): Observation? {
+    private suspend fun observe(requestScreenshot: Boolean = false): Observation? {
         val service = com.mewmix.nabu.accessibility.NabuAccessibilityService.instance
         if (service == null) {
             logger("UiAutomation observe failed: AccessibilityService not connected")
@@ -795,6 +801,22 @@ class UiAutomationOrchestrator(
         }
 
         val capturedMs = monotonicNowMs()
+        return observationFromSnapshot(
+            snapshot = snapshot,
+            requestScreenshot = requestScreenshot,
+            captureStartedMs = captureStartedMs,
+            capturedMs = capturedMs,
+            source = "forced_capture"
+        )
+    }
+
+    private fun observationFromSnapshot(
+        snapshot: com.mewmix.nabu.accessibility.UiSnapshot,
+        requestScreenshot: Boolean,
+        captureStartedMs: Long,
+        capturedMs: Long,
+        source: String
+    ): Observation {
         val screenState = UiTreeIndexer.build(snapshot)
         val indexedMs = monotonicNowMs()
         var screenshotPath: String? = null
@@ -804,7 +826,9 @@ class UiAutomationOrchestrator(
             android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
         ) {
             val path = context.cacheDir.absolutePath + "/nabu_ui_${snapshot.id}.png"
-            if (service.takeScreenshotToPath(path)) {
+            if (com.mewmix.nabu.accessibility.NabuAccessibilityService.instance
+                    ?.takeScreenshotToPath(path) == true
+            ) {
                 screenshotPath = path
                 artifactPaths.add(path)
                 pendingArtifactPaths.add(path)
@@ -828,6 +852,7 @@ class UiAutomationOrchestrator(
                     "element_count" to observation.screen.elements.size,
                     "actionable_count" to observation.screen.plannerElements().size,
                     "screenshot" to (observation.screenshotPath != null),
+                    "source" to source,
                     "capture_ms" to (capturedMs - captureStartedMs),
                     "index_ms" to (indexedMs - capturedMs)
                 )
@@ -835,7 +860,23 @@ class UiAutomationOrchestrator(
         }
     }
 
-    private suspend fun observeInitial(): Observation? {
+    private suspend fun observeInitial(
+        initialSnapshot: com.mewmix.nabu.accessibility.UiSnapshot?
+    ): Observation? {
+        val service = com.mewmix.nabu.accessibility.NabuAccessibilityService.instance
+        if (initialSnapshot != null && service != null) {
+            service.promoteSnapshotForAction(initialSnapshot)?.let { promoted ->
+                val now = monotonicNowMs()
+                return observationFromSnapshot(
+                    snapshot = promoted,
+                    requestScreenshot = false,
+                    captureStartedMs = now,
+                    capturedMs = now,
+                    source = "preflight_reuse"
+                )
+            }
+            trace("observation_reuse_rejected", mapOf("reason_code" to "preflight_snapshot_superseded"))
+        }
         val deadline = monotonicNowMs() + INITIAL_OBSERVATION_TIMEOUT_MS
         var sequence = com.mewmix.nabu.accessibility.UiSnapshotStore.currentSnapshot.value?.sequence ?: 0L
         do {
@@ -860,9 +901,6 @@ class UiAutomationOrchestrator(
         action: UiActionStep
     ): Observation? {
         val maxWaitMs = UiTransitionPolicy.maxWaitMs(action, budget)
-        if (budget.postActionSettleDelayMs > 0) {
-            delay(budget.postActionSettleDelayMs)
-        }
         if (maxWaitMs <= 0) return observe()
 
         progress("Transition", "Waiting for Android to settle after ${actionLabel(action)}")
@@ -872,20 +910,25 @@ class UiAutomationOrchestrator(
         do {
             val remainingMs = deadline - monotonicNowMs()
             if (remainingMs <= 0) break
-            com.mewmix.nabu.accessibility.UiSnapshotStore.awaitAfter(
+            val eventSnapshot = com.mewmix.nabu.accessibility.UiSnapshotStore.awaitAfter(
                 sequence = observedSequence,
                 timeoutMs = remainingMs
             ) ?: break
-            if (budget.postActionSettleDelayMs > 0) {
-                delay(budget.postActionSettleDelayMs.coerceAtMost(75L))
-            }
-            val candidate = observe(requestScreenshot = false)
-            if (candidate != null) {
-                latest?.let { cleanupArtifacts(it.artifactPaths) }
-                latest = candidate
-                observedSequence = candidate.snapshotSequence
-                if (UiTransitionPolicy.isSettled(previous.screen, candidate.screen, action)) break
-            }
+            observedSequence = eventSnapshot.sequence
+            val promoted = com.mewmix.nabu.accessibility.NabuAccessibilityService.instance
+                ?.promoteSnapshotForAction(eventSnapshot)
+                ?: continue
+            val now = monotonicNowMs()
+            val candidate = observationFromSnapshot(
+                snapshot = promoted,
+                requestScreenshot = false,
+                captureStartedMs = now,
+                capturedMs = now,
+                source = "event_promotion"
+            )
+            latest?.let { cleanupArtifacts(it.artifactPaths) }
+            latest = candidate
+            if (UiTransitionPolicy.isSettled(previous.screen, candidate.screen, action)) break
         } while (true)
 
         return latest ?: observe(requestScreenshot = false)
@@ -1065,22 +1108,6 @@ class UiAutomationOrchestrator(
     private fun shouldAttachScreenshot(jsonRetry: Boolean): Boolean {
         if (jsonRetry || !backend.supportsImageInput()) return false
         return backend !is LiteRtLmBackend && !backend.runtimeDescription().startsWith("LITERT-LM")
-    }
-
-    private fun deterministicNavigationAction(goal: String): UiActionStep? {
-        val normalized = goal.lowercase()
-            .replace(Regex("""[^a-z0-9]+"""), " ")
-            .trim()
-            .removePrefix("please ")
-        return when (normalized) {
-            "press home", "go home", "go to home", "open home screen", "show home screen" ->
-                UiActionStep.PressHome
-            "press back", "go back" -> UiActionStep.PressBack
-            "open recents", "show recents", "press recents" -> UiActionStep.PressRecents
-            "open notifications", "show notifications" -> UiActionStep.OpenNotifications
-            "open quick settings", "show quick settings" -> UiActionStep.OpenQuickSettings
-            else -> null
-        }
     }
 
     private fun isDeviceLocked(): Boolean {
@@ -1376,11 +1403,13 @@ class UiAutomationOrchestrator(
     }
 
     private fun selectorFor(element: UiElement): Map<String, String> = mapOf(
+        "element_id" to element.id,
         "tree_path" to element.treePath,
         "resource_id" to element.resourceId.orEmpty(),
         "text" to element.text.orEmpty(),
         "content_desc" to element.contentDescription.orEmpty(),
-        "class" to element.className.orEmpty()
+        "class" to element.className.orEmpty(),
+        "bounds" to element.bounds?.toList()?.joinToString(",").orEmpty()
     )
 
     private fun assertionMatches(assertion: UiAssertion, screen: UiScreenState): Boolean {

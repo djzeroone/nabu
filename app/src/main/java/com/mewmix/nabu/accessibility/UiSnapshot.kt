@@ -85,6 +85,18 @@ data class UiSnapshot(
     )
 )
 
+internal fun UiSnapshot.isExactPromotionOf(expected: UiSnapshot): Boolean =
+    sequence == expected.sequence &&
+        id == expected.id &&
+        packageName == expected.packageName &&
+        windowId == expected.windowId &&
+        stateFingerprint == expected.stateFingerprint &&
+        rotation == expected.rotation &&
+        displayBounds.left == expected.displayBounds.left &&
+        displayBounds.top == expected.displayBounds.top &&
+        displayBounds.right == expected.displayBounds.right &&
+        displayBounds.bottom == expected.displayBounds.bottom
+
 /**
  * Stable state identity used to distinguish a real UI mutation from duplicate
  * accessibility events. This is intentionally cheaper than allocating JSON or

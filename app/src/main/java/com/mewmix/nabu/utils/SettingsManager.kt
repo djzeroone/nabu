@@ -86,6 +86,13 @@ object SettingsManager {
     fun getActionModelId(context: Context): String? =
         DatabaseManager.getSetting(context, "action_model_id")?.trim()?.takeIf(String::isNotEmpty)
 
+    fun setKeepActionModelReady(context: Context, enabled: Boolean) {
+        DatabaseManager.setSetting(context, "keep_action_model_ready", if (enabled) "1" else "0")
+    }
+
+    fun keepActionModelReady(context: Context): Boolean =
+        (DatabaseManager.getSetting(context, "keep_action_model_ready") ?: "1") == "1"
+
     fun setBenchmark(context: Context, enabled: Boolean) {
         DatabaseManager.setSetting(context, "benchmark", if (enabled) "1" else "0")
     }

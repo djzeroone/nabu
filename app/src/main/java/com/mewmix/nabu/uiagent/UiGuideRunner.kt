@@ -113,11 +113,13 @@ class UiGuideRunner(
                     return failure("Guide selected a target that is not available.")
                 }
                 val selector = mapOf(
+                    "element_id" to element.id,
                     "tree_path" to element.treePath,
                     "resource_id" to element.resourceId.orEmpty(),
                     "text" to element.text.orEmpty(),
                     "content_desc" to element.contentDescription.orEmpty(),
-                    "class" to element.className.orEmpty()
+                    "class" to element.className.orEmpty(),
+                    "bounds" to element.bounds?.toList()?.joinToString(",").orEmpty()
                 )
                 val arguments = linkedMapOf<String, Any>(
                     "observation_id" to snapshot.id,

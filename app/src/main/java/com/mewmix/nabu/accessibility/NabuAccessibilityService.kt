@@ -41,6 +41,10 @@ class NabuAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         Log.d(TAG, "Service connected")
+        com.mewmix.nabu.uiagent.ActionRequestDispatcher.onAccessibilityConnectionChanged(
+            applicationContext,
+            connected = true
+        )
         actionOverlay = ActionSessionOverlay(this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -54,26 +58,56 @@ class NabuAccessibilityService : AccessibilityService() {
     }
 
     private val serviceScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.SupervisorJob())
+    private val eventCaptureCoalescer = AccessibilityEventCaptureCoalescer()
+    private var leadingSnapshotJob: kotlinx.coroutines.Job? = null
     private var snapshotJob: kotlinx.coroutines.Job? = null
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         if (event.eventType in SNAPSHOT_EVENT_TYPES) {
+            val plan = eventCaptureCoalescer.onMeaningfulEvent()
+            if (plan.captureLeading) {
+                leadingSnapshotJob = serviceScope.launch {
+                    captureEventSnapshot()
+                }
+            }
             snapshotJob?.cancel()
             snapshotJob = serviceScope.launch {
                 kotlinx.coroutines.delay(EVENT_DEBOUNCE_MS)
-                captureEventSnapshot()
+                if (eventCaptureCoalescer.isCurrent(plan.generation)) {
+                    captureEventSnapshot()
+                    eventCaptureCoalescer.finishTrailing(plan.generation)
+                }
             }
         }
     }
 
     /** Captures a snapshot and atomically leases it for one UI action. */
     fun forceCaptureSnapshot(): UiSnapshot? {
+        leadingSnapshotJob?.cancel()
+        leadingSnapshotJob = null
         snapshotJob?.cancel()
         snapshotJob = null
+        eventCaptureCoalescer.reset()
         return synchronized(observationLock) {
             captureSnapshotLocked(bindForAction = true)
         }
+    }
+
+    /**
+     * Promotes an already-published immutable snapshot into fresh single-use action authority.
+     *
+     * Promotion is deliberately exact: a newer capture, even one with an equivalent fingerprint,
+     * wins and the caller must use that newer observation. Physical dispatch still reconstructs
+     * and compares the live hierarchy before consuming this lease.
+     */
+    fun promoteSnapshotForAction(expected: UiSnapshot): UiSnapshot? = synchronized(observationLock) {
+        val latest = UiSnapshotStore.currentSnapshot.value ?: return@synchronized null
+        if (!latest.isExactPromotionOf(expected)) {
+            return@synchronized null
+        }
+        actionObservationLease.bind(latest.toActionAuthority())
+        latest
     }
 
     private fun captureEventSnapshot() {
@@ -191,7 +225,12 @@ class NabuAccessibilityService : AccessibilityService() {
         actionOverlay?.hide()
         actionOverlay = null
         if (instance == this) instance = null
+        com.mewmix.nabu.uiagent.ActionRequestDispatcher.onAccessibilityConnectionChanged(
+            applicationContext,
+            connected = false
+        )
         serviceScope.cancel()
+        eventCaptureCoalescer.reset()
         UiSnapshotStore.clear()
         super.onDestroy()
     }
@@ -709,6 +748,7 @@ class NabuAccessibilityService : AccessibilityService() {
     }
 
     private fun matchesSelector(node: AccessibilityNodeInfo, selector: JSONObject): Boolean {
+        val treePath = selector.optString("tree_path").trim()
         val fields = listOf(
             "resource_id" to node.viewIdResourceName.orEmpty(),
             "text" to node.text?.toString().orEmpty(),
@@ -723,7 +763,35 @@ class NabuAccessibilityService : AccessibilityService() {
                 if (actual != expected) return false
             }
         }
-        return constrained || selector.optString("tree_path").isNotEmpty()
+        val expectedBounds = selector.optString("bounds").trim()
+        if (expectedBounds.isNotEmpty()) {
+            val actualBounds = Rect().also(node::getBoundsInScreen)
+            val actual = listOf(
+                actualBounds.left,
+                actualBounds.top,
+                actualBounds.right,
+                actualBounds.bottom
+            ).joinToString(",")
+            if (actual != expectedBounds) return false
+        }
+        val expectedElementId = selector.optString("element_id").trim()
+        if (expectedElementId.isNotEmpty()) {
+            val actualBounds = Rect().also(node::getBoundsInScreen)
+            val actualElementId = ObservedNodeIdentity.compute(
+                packageName = node.packageName?.toString(),
+                resourceId = node.viewIdResourceName,
+                text = node.text?.toString(),
+                contentDescription = node.contentDescription?.toString(),
+                className = node.className?.toString(),
+                left = actualBounds.left,
+                top = actualBounds.top,
+                right = actualBounds.right,
+                bottom = actualBounds.bottom,
+                treePath = treePath
+            )
+            if (actualElementId != expectedElementId) return false
+        }
+        return constrained || treePath.isNotEmpty()
     }
 
     private fun performNodeAction(node: AccessibilityNodeInfo, action: Int): Boolean {

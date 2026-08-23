@@ -8,6 +8,7 @@ import com.mewmix.nabu.accessibility.UiRangeInfo
 import com.mewmix.nabu.accessibility.UiSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,6 +49,21 @@ class UiTreeIndexerTest {
         assertTrue(toggle.clickable)
         assertEquals(UiBounds(920, 215, 1010, 285), toggle.bounds)
         assertNotNull(toggle.parentId)
+        assertEquals(
+            com.mewmix.nabu.accessibility.ObservedNodeIdentity.compute(
+                packageName = toggle.packageName,
+                resourceId = toggle.resourceId,
+                text = toggle.text,
+                contentDescription = toggle.contentDescription,
+                className = toggle.className,
+                left = toggle.bounds?.left,
+                top = toggle.bounds?.top,
+                right = toggle.bounds?.right,
+                bottom = toggle.bounds?.bottom,
+                treePath = toggle.treePath
+            ),
+            toggle.id
+        )
     }
 
     @Test
@@ -102,5 +118,44 @@ class UiTreeIndexerTest {
         assertEquals("ca0", element.customActions.single().ref)
         assertEquals("Reset", element.customActions.single().label)
         assertEquals(42f, element.range?.current)
+        assertEquals(snapshot.stateFingerprint, UiTreeIndexer.build(snapshot).screenId)
+    }
+
+    @Test
+    fun `snapshot screen identity changes with capability-sensitive fingerprint`() {
+        val node = UiNode(
+            treePath = "0",
+            packageName = "p",
+            resourceId = "action",
+            className = "android.widget.Button",
+            text = "Run",
+            contentDescription = "",
+            isCheckable = false,
+            isChecked = false,
+            isClickable = true,
+            isEnabled = true,
+            isEditable = false,
+            isFocusable = true,
+            isFocused = false,
+            isVisibleToUser = true,
+            isScrollable = false,
+            isLongClickable = false,
+            isPassword = false,
+            isSelected = false,
+            boundsInScreen = Rect(0, 0, 100, 40),
+            children = emptyList(),
+            standardActions = listOf(SnapshotNodeAction(16, "click", null))
+        )
+        val actionable = UiSnapshot("a", 1L, 1L, "p", "fixture", 0, Rect(0, 0, 100, 100), node)
+        val unavailable = actionable.copy(
+            id = "b",
+            rootNode = node.copy(standardActions = emptyList()),
+            stateFingerprint = com.mewmix.nabu.accessibility.UiSnapshotFingerprint.compute(
+                "p", "fixture", 0, node.copy(standardActions = emptyList())
+            )
+        )
+
+        assertEquals(actionable.stateFingerprint, UiTreeIndexer.build(actionable).screenId)
+        assertNotEquals(UiTreeIndexer.build(actionable).screenId, UiTreeIndexer.build(unavailable).screenId)
     }
 }

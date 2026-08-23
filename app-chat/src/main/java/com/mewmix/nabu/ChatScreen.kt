@@ -27,7 +27,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -133,7 +138,13 @@ fun ChatScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MessageBubble(chatMessage: ChatMessage) {
+fun MessageBubble(
+    chatMessage: ChatMessage,
+    onEdit: (() -> Unit)? = null,
+    onRegenerate: (() -> Unit)? = null,
+    onReplay: (() -> Unit)? = null,
+    onViewTrace: (() -> Unit)? = null
+) {
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
     val bubbleColor = if (chatMessage.isFromUser) {
@@ -151,69 +162,148 @@ fun MessageBubble(chatMessage: ChatMessage) {
             .replace("\\n", "\n")
             .replace("/n", "\n")
     }
+    var menuExpanded by remember { mutableStateOf(false) }
+    val hasActionMenu = onEdit != null || onRegenerate != null || onReplay != null ||
+        (onViewTrace != null && chatMessage.actionTrace != null)
+
+    fun copyMessage() {
+        clipboardManager.setText(AnnotatedString(formatted))
+        Toast.makeText(context, "Copied message", Toast.LENGTH_SHORT).show()
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (chatMessage.isFromUser) Arrangement.End else Arrangement.Start
     ) {
-        Card(
-            modifier = Modifier
-                .padding(4.dp)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = {
-                        clipboardManager.setText(AnnotatedString(formatted))
-                        Toast.makeText(context, "Copied message", Toast.LENGTH_SHORT).show()
-                    }
-                ),
-            shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomStart = if (chatMessage.isFromUser) 16.dp else 0.dp,
-                bottomEnd = if (chatMessage.isFromUser) 0.dp else 16.dp
-            ),
-            colors = CardDefaults.cardColors(
-                containerColor = bubbleColor,
-                contentColor = contentColor
-            )
+        Column(
+            horizontalAlignment = if (chatMessage.isFromUser) Alignment.End else Alignment.Start
         ) {
-            CompositionLocalProvider(LocalContentColor provides contentColor) {
-                Column {
-                    chatMessage.image?.let { img ->
-                        Image(
-                            bitmap = img.bitmap.asImageBitmap(),
-                            contentDescription = "Message image",
-                            modifier = Modifier
-                                .padding(8.dp)
-                                .size(200.dp),
-                            contentScale = ContentScale.Fit
-                        )
-                    }
-                    chatMessage.audio?.let { audio ->
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.AttachFile,
-                                contentDescription = null,
-                                tint = contentColor.copy(alpha = 0.78f)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = audio.displayName ?: "Audio attachment",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = contentColor.copy(alpha = 0.78f)
-                            )
+            Box {
+                Card(
+                    modifier = Modifier
+                        .padding(4.dp)
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                if (hasActionMenu) menuExpanded = true else copyMessage()
+                            }
+                        ),
+                    shape = RoundedCornerShape(
+                        topStart = 16.dp,
+                        topEnd = 16.dp,
+                        bottomStart = if (chatMessage.isFromUser) 16.dp else 0.dp,
+                        bottomEnd = if (chatMessage.isFromUser) 0.dp else 16.dp
+                    ),
+                    colors = CardDefaults.cardColors(
+                        containerColor = bubbleColor,
+                        contentColor = contentColor
+                    )
+                ) {
+                    CompositionLocalProvider(LocalContentColor provides contentColor) {
+                        Column {
+                            chatMessage.image?.let { img ->
+                                Image(
+                                    bitmap = img.bitmap.asImageBitmap(),
+                                    contentDescription = "Message image",
+                                    modifier = Modifier
+                                        .padding(8.dp)
+                                        .size(200.dp),
+                                    contentScale = ContentScale.Fit
+                                )
+                            }
+                            chatMessage.audio?.let { audio ->
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AttachFile,
+                                        contentDescription = null,
+                                        tint = contentColor.copy(alpha = 0.78f)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = audio.displayName ?: "Audio attachment",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = contentColor.copy(alpha = 0.78f)
+                                    )
+                                }
+                            }
+                            if (formatted.isNotBlank()) {
+                                SelectionContainer {
+                                    MarkdownText(
+                                        markdown = formatted,
+                                        modifier = Modifier.padding(12.dp),
+                                        style = MaterialTheme.typography.bodyLarge.copy(color = contentColor)
+                                    )
+                                }
+                            }
                         }
                     }
-                    if (formatted.isNotBlank()) {
-                        SelectionContainer {
-                            MarkdownText(
-                                markdown = formatted,
-                                modifier = Modifier.padding(12.dp),
-                                style = MaterialTheme.typography.bodyLarge.copy(color = contentColor)
-                            )
+                }
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Copy") },
+                        onClick = {
+                            menuExpanded = false
+                            copyMessage()
+                        }
+                    )
+                    onEdit?.let { action ->
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            onClick = {
+                                menuExpanded = false
+                                action()
+                            }
+                        )
+                    }
+                    onRegenerate?.let { action ->
+                        DropdownMenuItem(
+                            text = { Text("Regenerate") },
+                            onClick = {
+                                menuExpanded = false
+                                action()
+                            }
+                        )
+                    }
+                    onReplay?.let { action ->
+                        DropdownMenuItem(
+                            text = { Text("Replay aloud") },
+                            onClick = {
+                                menuExpanded = false
+                                action()
+                            }
+                        )
+                    }
+                    if (onViewTrace != null && chatMessage.actionTrace != null) {
+                        DropdownMenuItem(
+                            text = { Text("View action trace") },
+                            onClick = {
+                                menuExpanded = false
+                                onViewTrace()
+                            }
+                        )
+                    }
+                }
+            }
+
+            if (hasActionMenu) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    BrutalButton(onClick = ::copyMessage) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message")
+                    }
+                    onEdit?.let { action ->
+                        BrutalButton(onClick = action) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Edit message")
+                        }
+                    }
+                    onRegenerate?.let { action ->
+                        BrutalButton(onClick = action) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Retry from this message")
                         }
                     }
                 }

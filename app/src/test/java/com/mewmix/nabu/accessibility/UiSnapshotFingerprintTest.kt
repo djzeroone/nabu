@@ -3,6 +3,8 @@ package com.mewmix.nabu.accessibility
 import android.graphics.Rect
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UiSnapshotFingerprintTest {
@@ -39,6 +41,25 @@ class UiSnapshotFingerprintTest {
         val after = snapshot(text = "Home", systemActions = setOf("back"))
 
         assertNotEquals(before.stateFingerprint, after.stateFingerprint)
+    }
+
+    @Test
+    fun `promotion requires the exact latest immutable observation`() {
+        val expected = snapshot(text = "Settings").copy(id = "obs", sequence = 7L, windowId = 4)
+
+        assertTrue(expected.copy().isExactPromotionOf(expected))
+        assertFalse(expected.copy(sequence = 8L).isExactPromotionOf(expected))
+        assertFalse(expected.copy(id = "new-observation").isExactPromotionOf(expected))
+        assertFalse(expected.copy(windowId = 5).isExactPromotionOf(expected))
+        assertFalse(expected.copy(rotation = 1).isExactPromotionOf(expected))
+        val changedBounds = Rect().apply {
+            left = expected.displayBounds.left
+            top = expected.displayBounds.top
+            right = expected.displayBounds.right + 1
+            bottom = expected.displayBounds.bottom
+        }
+        assertFalse(expected.copy(displayBounds = changedBounds).isExactPromotionOf(expected))
+        assertFalse(expected.copy(stateFingerprint = "changed").isExactPromotionOf(expected))
     }
 
     private fun snapshot(
