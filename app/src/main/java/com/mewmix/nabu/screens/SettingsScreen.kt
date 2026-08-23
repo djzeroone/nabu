@@ -63,6 +63,7 @@ import android.net.Uri
 import com.mewmix.nabu.data.ModelManager
 import com.mewmix.nabu.data.ModelType
 import com.mewmix.nabu.data.OAuthRemoteModels
+import com.mewmix.nabu.uiagent.ActionModelEligibility
 import com.mewmix.nabu.uiagent.ActionRequestDispatcher
 import com.mewmix.nabu.supertonic.SupertonicLanguages
 import java.text.DateFormat
@@ -89,8 +90,9 @@ fun SettingsScreen(
     var expanded by remember { mutableStateOf(false) }
     val modelManager = remember { ModelManager(context) }
     val availableActionModels = remember {
-        (modelManager.models.filter { it.type == ModelType.LLM && it.isDownloaded } +
+        (modelManager.models.filter { it.isDownloaded && ActionModelEligibility.isEligible(it) } +
             OAuthRemoteModels.connectedModels(context.applicationContext))
+            .filter(ActionModelEligibility::isEligible)
             .distinctBy { it.id }
     }
     var actionModelId by remember { mutableStateOf(SettingsManager.getActionModelId(context)) }

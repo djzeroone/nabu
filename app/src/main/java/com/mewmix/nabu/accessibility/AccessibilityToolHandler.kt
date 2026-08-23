@@ -42,7 +42,7 @@ object AccessibilityToolHandler {
      * Callers must run this before parking Chat or opening another task. A successful probe proves
      * both that Android has bound the service and that it can lease a real accessibility snapshot.
      */
-    fun probeControlPlane(context: Context): ControlPlaneProbe {
+    fun probeControlPlane(context: Context, captureSnapshot: Boolean = true): ControlPlaneProbe {
         val service = NabuAccessibilityService.instance
         if (service == null) {
             val manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
@@ -62,6 +62,7 @@ object AccessibilityToolHandler {
             }
             return ControlPlaneProbe(serviceReady = false, snapshot = null, failure = failure)
         }
+        if (!captureSnapshot) return ControlPlaneProbe(serviceReady = true, snapshot = null)
         val snapshot = service.forceCaptureSnapshot()
         if (snapshot == null) {
             return ControlPlaneProbe(

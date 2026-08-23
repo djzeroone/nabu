@@ -10,6 +10,7 @@ enum class ActionSessionMode {
 
 enum class ActionSessionStatus {
     IDLE,
+    ROUTING,
     OBSERVING,
     PLANNING,
     EXECUTING,
@@ -26,6 +27,8 @@ internal fun actionStatusForProgress(
 ): ActionSessionStatus {
     val normalized = phase.trim().lowercase()
     return when {
+        normalized.startsWith("rout") || normalized.startsWith("start") ->
+            ActionSessionStatus.ROUTING
         normalized.startsWith("observe") -> ActionSessionStatus.OBSERVING
         normalized.startsWith("plan") -> ActionSessionStatus.PLANNING
         normalized.startsWith("execute") || normalized.startsWith("navigate") ->
@@ -41,6 +44,8 @@ internal fun actionStatusForProgress(
 data class ActionSessionMetrics(
     val requestReceivedMs: Long = 0L,
     val sessionCreatedMs: Long = 0L,
+    val routingStartedMs: Long = 0L,
+    val routingCompletedMs: Long = 0L,
     val observationStartedMs: Long = 0L,
     val observationReadyMs: Long = 0L,
     val modelRequestStartedMs: Long = 0L,
@@ -52,11 +57,17 @@ data class ActionSessionMetrics(
     val verificationCompleteMs: Long = 0L,
     val nextModelRequestMs: Long = 0L,
     val totalStepLatencyMs: Long = 0L,
-    val totalSessionLatencyMs: Long = 0L
+    val totalSessionLatencyMs: Long = 0L,
+    val plannerRequestCount: Long = 0L,
+    val appResolutionMs: Long = 0L,
+    val modelRequired: Long = 0L,
+    val modelInitializationOnCriticalPath: Long = 0L
 ) {
     fun toMap(): Map<String, Long> = mapOf(
         "request_received_ms" to requestReceivedMs,
         "session_created_ms" to sessionCreatedMs,
+        "routing_started_ms" to routingStartedMs,
+        "routing_completed_ms" to routingCompletedMs,
         "observation_started_ms" to observationStartedMs,
         "observation_ready_ms" to observationReadyMs,
         "model_request_started_ms" to modelRequestStartedMs,
@@ -69,11 +80,16 @@ data class ActionSessionMetrics(
         "next_model_request_ms" to nextModelRequestMs,
         "total_step_latency_ms" to totalStepLatencyMs,
         "total_session_latency_ms" to totalSessionLatencyMs,
+        "planner_request_count" to plannerRequestCount,
+        "app_resolution_ms" to appResolutionMs,
+        "model_required" to modelRequired,
+        "model_initialization_on_critical_path" to modelInitializationOnCriticalPath,
         "invocation_to_first_action_ms" to duration(requestReceivedMs, actionDispatchMs),
         "model_first_response_latency_ms" to duration(modelRequestStartedMs, modelFirstResponseMs),
         "model_latency_ms" to duration(modelRequestStartedMs, modelResponseCompleteMs),
         "action_latency_ms" to duration(actionDispatchMs, actionCompleteMs),
-        "verification_latency_ms" to duration(verificationStartedMs, verificationCompleteMs)
+        "verification_latency_ms" to duration(verificationStartedMs, verificationCompleteMs),
+        "initial_observation_ms" to duration(routingStartedMs, observationReadyMs)
     )
 
     fun recordRuntimeEvent(
@@ -81,6 +97,16 @@ data class ActionSessionMetrics(
         occurredAtMs: Long,
         fields: Map<String, Any?> = emptyMap()
     ): ActionSessionMetrics = when (name) {
+        "routing_started" -> copy(
+            routingStartedMs = routingStartedMs.takeIf { it > 0L } ?: occurredAtMs
+        )
+        "routing_completed" -> copy(
+            routingCompletedMs = occurredAtMs,
+            appResolutionMs = fields.long("app_resolution_ms"),
+            modelRequired = if (fields["model_required"] == true) 1L else 0L,
+            modelInitializationOnCriticalPath =
+                if (fields["model_initialization_on_critical_path"] == true) 1L else 0L
+        )
         "observation_captured" -> {
             val workMs = fields.long("capture_ms") + fields.long("index_ms")
             copy(
@@ -90,9 +116,9 @@ data class ActionSessionMetrics(
             )
         }
         "planner_request_started" -> if (modelRequestStartedMs == 0L) {
-            copy(modelRequestStartedMs = occurredAtMs)
+            copy(modelRequestStartedMs = occurredAtMs, plannerRequestCount = plannerRequestCount + 1L)
         } else {
-            copy(nextModelRequestMs = occurredAtMs)
+            copy(nextModelRequestMs = occurredAtMs, plannerRequestCount = plannerRequestCount + 1L)
         }
         "planner_first_response" -> copy(
             modelFirstResponseMs = modelFirstResponseMs.takeIf { it > 0L } ?: occurredAtMs

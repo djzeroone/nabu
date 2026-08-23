@@ -2120,6 +2120,7 @@ class ChatViewModel(
         }
 
         if (session.status in setOf(
+                ActionSessionStatus.ROUTING,
                 ActionSessionStatus.PLANNING,
                 ActionSessionStatus.OBSERVING,
                 ActionSessionStatus.EXECUTING,
@@ -2979,18 +2980,24 @@ class ChatViewModel(
         }
         if (effectiveToolCall.toolName == UiAutomationOrchestrator.CONTROL_UI_TOOL) {
             val goal = effectiveToolCall.arguments["goal"]?.toString()?.trim().orEmpty()
-            val plannerBackend = llmBackend ?: return ToolResult(
-                toolName = effectiveToolCall.toolName,
-                output = "No LLM backend is available for UI planning.",
-                isError = true
-            )
             _orchestration.value = _orchestration.value?.copy(isVisible = false)
             _isUiAutomationActive.value = true
             delay(50L)
             return try {
                 UiAutomationOrchestrator(
                     context = appContext,
-                    backend = plannerBackend,
+                    backendProvider = {
+                        com.mewmix.nabu.uiagent.ActionRequestDispatcher
+                            .acquireEligibleActionBackend(appContext)
+                    },
+                    backendReadyProvider = {
+                        com.mewmix.nabu.uiagent.ActionRequestDispatcher
+                            .isEligibleActionBackendReady(appContext)
+                    },
+                    onBackendReleased = {
+                        com.mewmix.nabu.uiagent.ActionRequestDispatcher
+                            .releaseEligibleActionBackend(appContext)
+                    },
                     requestConfirmation = { description ->
                         val deferred = CompletableDeferred<Boolean>()
                         pendingUiActionConfirmationDeferred = deferred

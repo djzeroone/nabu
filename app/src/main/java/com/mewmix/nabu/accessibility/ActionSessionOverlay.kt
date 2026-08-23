@@ -379,6 +379,7 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
                 }
 
                 val isRunning = session.status in listOf(
+                    ActionSessionStatus.ROUTING,
                     ActionSessionStatus.PLANNING,
                     ActionSessionStatus.OBSERVING,
                     ActionSessionStatus.EXECUTING,
@@ -406,6 +407,7 @@ class ActionSessionOverlay(private val service: NabuAccessibilityService) {
 
                 statusContainer.visibility = View.VISIBLE
                 val phaseText = when (session.status) {
+                    ActionSessionStatus.ROUTING -> "Routing: ${session.currentGoal}"
                     ActionSessionStatus.PLANNING -> "Planning: ${session.currentGoal}"
                     ActionSessionStatus.OBSERVING -> "Observing screen..."
                     ActionSessionStatus.EXECUTING -> "Acting: ${session.pendingObjective ?: session.currentGoal}"

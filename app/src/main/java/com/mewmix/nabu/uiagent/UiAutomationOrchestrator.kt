@@ -11,6 +11,7 @@ import com.mewmix.nabu.chat.LlmMessage
 import com.mewmix.nabu.chat.LiteRtLmBackend
 import com.mewmix.nabu.chat.LlmToolDefinition
 import com.mewmix.nabu.accessibility.AccessibilityToolHandler
+import com.mewmix.nabu.accessibility.UiSnapshotStore
 import com.mewmix.nabu.tools.ToolCall
 import com.mewmix.nabu.tools.ToolResult
 import kotlinx.coroutines.CompletableDeferred
@@ -29,7 +30,10 @@ import java.util.UUID
 
 class UiAutomationOrchestrator(
     private val context: Context,
-    private val backend: LlmBackend,
+    private val backend: LlmBackend? = null,
+    private val backendProvider: suspend () -> LlmBackend? = { backend },
+    private val backendReadyProvider: () -> Boolean = { backend != null },
+    private val onBackendReleased: () -> Unit = {},
     private val requestConfirmation: suspend (String) -> Boolean,
     private val budget: AutomationBudget = AutomationBudget(),
     private val isScheduled: Boolean = false,
@@ -70,6 +74,11 @@ class UiAutomationOrchestrator(
     private var activeSessionId: String? = null
     private var invocationStartedMonotonicMs: Long = 0L
     private var firstPhysicalActionRecorded: Boolean = false
+    private var activeBackend: LlmBackend? = backend
+    private var modelRoutePublished: Boolean = false
+    private var actionModelUnavailable: Boolean = false
+    private var appResolutionDurationMs: Long = 0L
+    private var backendLeaseAcquired: Boolean = false
 
     suspend fun run(goal: String): ToolResult {
         invocationStartedMonotonicMs = monotonicNowMs()
@@ -83,6 +92,8 @@ class UiAutomationOrchestrator(
             }
         )
         trace.emit("session_requested", mapOf("goal" to goal, "scheduled" to isScheduled))
+        trace.emit("request_received")
+        trace.emit("routing_started")
         if (!sessionMutex.tryLock()) {
             onProgress("Queue", "Waiting for the active device-control session to finish")
             trace.emit("session_queued", mapOf("reason_code" to "device_control_owned"))
@@ -103,7 +114,38 @@ class UiAutomationOrchestrator(
                     terminalResult = it
                 }
             }
-            val controlPlaneProbe = AccessibilityToolHandler.probeControlPlane(context)
+            val availabilityProbe = AccessibilityToolHandler.probeControlPlane(
+                context,
+                captureSnapshot = false
+            )
+            availabilityProbe.failure?.let { detail ->
+                logger("UiAutomation preflight failed before routing: $detail")
+                trace.emit(
+                    "session_preflight_failed",
+                    mapOf("reason_code" to "accessibility_control_plane_unavailable")
+                )
+                return failure(detail).also { terminalResult = it }
+            }
+            val appResolutionStartedMs = monotonicNowMs()
+            val service = com.mewmix.nabu.accessibility.NabuAccessibilityService.instance
+            val trustedEventSnapshot = UiSnapshotStore.currentSnapshot.value
+                ?.takeIf { System.currentTimeMillis() - it.capturedAtMs in 0..TRUSTED_EVENT_MAX_AGE_MS }
+            val requestResolution = DirectRequestResolver.resolve(
+                request = goal,
+                apps = DeviceAction.launchableAppIndex(context),
+                supportedSystemActions = if (trustedEventSnapshot != null) {
+                    service?.availableGlobalActionTokens().orEmpty()
+                } else {
+                    emptySet()
+                }
+            )
+            val appResolutionMs = monotonicNowMs() - appResolutionStartedMs
+            appResolutionDurationMs = appResolutionMs
+            val directResolution = requestResolution as? DirectRequestResolution.Resolved
+            val controlPlaneProbe = AccessibilityToolHandler.probeControlPlane(
+                context,
+                captureSnapshot = directResolution == null
+            )
             controlPlaneProbe.failure?.let { detail ->
                 logger("UiAutomation preflight failed before takeover: $detail")
                 trace.emit(
@@ -127,7 +169,9 @@ class UiAutomationOrchestrator(
             runWithCleanup(
                 initialGoal = goal,
                 sessionId = sessionId,
-                initialSnapshot = controlPlaneProbe.snapshot.takeUnless { mustParkChat }
+                initialSnapshot = controlPlaneProbe.snapshot.takeUnless { mustParkChat },
+                directResolution = directResolution,
+                appResolutionMs = appResolutionMs
             ).also { result ->
                 terminalResult = result
                 trace.emit(
@@ -153,6 +197,10 @@ class UiAutomationOrchestrator(
                 )
                 activeTrace = null
                 activeSessionId = null
+                if (backendLeaseAcquired) {
+                    backendLeaseAcquired = false
+                    onBackendReleased()
+                }
                 ControlSurfaceCoordinator.clear(sessionId)
                 AutomationSessionManager.finish(
                     sessionId = sessionId,
@@ -167,7 +215,9 @@ class UiAutomationOrchestrator(
     private suspend fun runWithCleanup(
         initialGoal: String,
         sessionId: String,
-        initialSnapshot: com.mewmix.nabu.accessibility.UiSnapshot?
+        initialSnapshot: com.mewmix.nabu.accessibility.UiSnapshot?,
+        directResolution: DirectRequestResolution.Resolved?,
+        appResolutionMs: Long
     ): ToolResult {
         var goal = initialGoal
         if (goal.isBlank()) return failure("UI automation goal is blank.")
@@ -180,35 +230,198 @@ class UiAutomationOrchestrator(
             trace("session_blocked", mapOf("reason_code" to "device_locked"))
             return failure("UI automation requires the device to be awake and unlocked.")
         }
-        progress("Observe", "Capturing the active window and accessibility tree")
-        var observation = observeInitial(initialSnapshot)
-            ?: return failure(
-                "Nabu lost its accessibility control plane while Android was switching windows. " +
-                    "Return to Nabu and invoke device control again."
+        var observation: Observation
+        var deterministicPrefixCount = 0
+        val currentEventSnapshot = UiSnapshotStore.currentSnapshot.value
+            ?.takeIf { System.currentTimeMillis() - it.capturedAtMs in 0..TRUSTED_EVENT_MAX_AGE_MS }
+        val executableDirectResolution = directResolution?.takeIf {
+            it.action is UiActionStep.OpenApp || currentEventSnapshot != null
+        }
+        if (executableDirectResolution != null) {
+            val fastPathStartedMs = monotonicNowMs()
+            val beforeSnapshot = currentEventSnapshot
+            val beforeScreen = beforeSnapshot?.let(UiTreeIndexer::build)
+            trace(
+                if (executableDirectResolution.completesGoalWhenVerified) {
+                    "routing_completed"
+                } else {
+                    "deterministic_prefix_selected"
+                },
+                mapOf(
+                    "route" to "request_fast_path",
+                    "model_required" to false,
+                    "model_initialization_on_critical_path" to false,
+                    "app_resolution_ms" to appResolutionMs,
+                    "planner_request_count" to 0
+                )
             )
+            progress("Execute", directRequestProgress(executableDirectResolution))
+            val execution = executeRequestLevelAction(executableDirectResolution.action, goal)
+            if (execution.isError) return execution
+            progress("Verify", "Observing the deterministic action result")
+            trace("verification_started", mapOf("route" to "request_fast_path"))
+            observation = observe()
+                ?: return failure("${actionLabel(executableDirectResolution.action)} ran, but its result could not be observed.")
+            val verification = verifyRequestLevelAction(
+                action = executableDirectResolution.action,
+                before = beforeScreen,
+                after = observation.screen
+            )
+            trace(
+                "verification_completed",
+                mapOf("route" to "request_fast_path", "verified" to verification.first)
+            )
+            if (!verification.first) return failure(verification.second)
+            publishFastPathReceipt(
+                sequence = 1,
+                action = executableDirectResolution.action,
+                before = beforeScreen,
+                after = observation.screen,
+                verification = verification.second,
+                mechanism = if (executableDirectResolution.action is UiActionStep.OpenApp) {
+                    "trusted_intent"
+                } else {
+                    "global_action"
+                },
+                startedMs = fastPathStartedMs
+            )
+            deterministicPrefixCount = 1
+            trace(
+                "request_fast_path_verified",
+                mapOf(
+                    "reason" to executableDirectResolution.reason,
+                    "action" to actionLabel(executableDirectResolution.action),
+                    "result_package" to observation.screen.packageName
+                )
+            )
+            if (executableDirectResolution.completesGoalWhenVerified) {
+                return success(verification.second)
+            }
+        } else {
+            progress("Observe", "Capturing the active window and accessibility tree")
+            observation = observeInitial(initialSnapshot)
+                ?: return failure(
+                    "Nabu lost its accessibility control plane while Android was switching windows. " +
+                        "Return to Nabu and invoke device control again."
+                )
+        }
 
         DirectSemanticActionResolver.resolve(goal, observation.screen)?.let { action ->
+            val fastPathStartedMs = monotonicNowMs()
+            trace(
+                "routing_completed",
+                mapOf(
+                    "route" to "ui_semantic_fast_path",
+                    "model_required" to false,
+                    "model_initialization_on_critical_path" to false,
+                    "app_resolution_ms" to appResolutionMs,
+                    "planner_request_count" to 0
+                )
+            )
             progress("Execute", "Running ${actionLabel(action)} without model inference")
             val actionPlan = UiActionPlan(goal, observation.screen.screenId, listOf(action))
+            var directObservation = observation
             when (val decision = UiActionValidator.validate(actionPlan, observation.screen)) {
                 UiPlanDecision.Allow -> Unit
                 is UiPlanDecision.Invalid -> return failure(decision.reason)
                 is UiPlanDecision.Block -> return failure(decision.reason)
-                is UiPlanDecision.RequireConfirmation -> Unit // execute() owns the bound JIT prompt.
+                is UiPlanDecision.RequireConfirmation -> {
+                    progress("Confirm", "Evaluating confirmation requirements")
+                    val expectedDestination = expectedDestinationForCommit(action, observation.screen)
+                    if (isMessagingCommitBoundary(action, observation.screen) && expectedDestination == null) {
+                        return failure("Action blocked: no verified pending message is bound to this send action.")
+                    }
+                    val verifiedDestination = if (expectedDestination != null) {
+                        when (val destination = DestinationResolver.resolve(observation.screen, expectedDestination)) {
+                            is DestinationResolver.DestinationResult.Verified -> destination.observed
+                            is DestinationResolver.DestinationResult.Mismatch ->
+                                return failure("Destination mismatch: observed '${destination.observed}' but expected '${destination.expected}'.")
+                            is DestinationResolver.DestinationResult.Unresolvable ->
+                                return failure("Action blocked: ${destination.reason}")
+                        }
+                    } else {
+                        null
+                    }
+                    val approved = withTimeoutOrNull(60_000L) {
+                        requestConfirmation(
+                            describeConfirmation(
+                                action,
+                                decision.reason,
+                                observation.screen,
+                                goal,
+                                verifiedDestination
+                            )
+                        )
+                    } ?: false
+                    if (!approved) return failure("User denied UI action confirmation or timed out.")
+                    val latest = observe(requestScreenshot = false)
+                        ?: return failure("Failed to re-observe screen for confirmation.")
+                    if (latest.screen.screenId != observation.screen.screenId) {
+                        return failure("Screen changed while awaiting confirmation. Action aborted.")
+                    }
+                    if (verifiedDestination != null) {
+                        when (val recheck = DestinationResolver.resolve(latest.screen, verifiedDestination)) {
+                            is DestinationResolver.DestinationResult.Verified -> Unit
+                            is DestinationResolver.DestinationResult.Mismatch ->
+                                return failure("Destination changed after confirmation: observed '${recheck.observed}' but expected '${recheck.expected}'.")
+                            is DestinationResolver.DestinationResult.Unresolvable ->
+                                return failure("Destination unresolvable after confirmation: ${recheck.reason}")
+                        }
+                    }
+                    directObservation = latest
+                    val fingerprint = "${actionLabel(action)}|${hashContent(action.toJson().toString(), goal)}|${latest.screen.screenId}"
+                    val contentHash = confirmationContentHash(action, latest.screen, goal)
+                    val grantId = ConfirmationManager.requestConfirmation(
+                        sessionId = sessionId,
+                        screenId = latest.screen.screenId,
+                        actionFingerprint = fingerprint,
+                        destination = verifiedDestination,
+                        contentHash = contentHash,
+                        timeoutMs = 120_000L
+                    )
+                    if (!ConfirmationManager.consumeConfirmation(
+                            grantId,
+                            sessionId,
+                            latest.screen.screenId,
+                            fingerprint,
+                            verifiedDestination,
+                            contentHash
+                        )
+                    ) {
+                        return failure("Confirmation expired or invalid.")
+                    }
+                }
             }
-            val result = execute(action, observation, sessionId, goal)
+            val result = execute(action, directObservation, sessionId, goal)
             if (result.isError) return result
-            val next = observeAfterAction(observation, action)
+            val next = observeAfterAction(directObservation, action)
                 ?: return failure("${actionLabel(action)} ran, but the resulting screen could not be observed.")
+            val postcondition = UiActionPostconditionVerifier.verify(
+                action,
+                directObservation.screen,
+                next.screen
+            )
+            if (postcondition.status != PostconditionStatus.VERIFIED) {
+                return failure(postcondition.detail)
+            }
             trace(
                 "deterministic_action_verified",
                 mapOf(
                     "action" to actionLabel(action),
-                    "source_screen_id" to observation.screen.screenId,
+                    "source_screen_id" to directObservation.screen.screenId,
                     "result_screen_id" to next.screen.screenId,
-                    "source_package" to observation.screen.packageName,
+                    "source_package" to directObservation.screen.packageName,
                     "result_package" to next.screen.packageName
                 )
+            )
+            publishFastPathReceipt(
+                sequence = deterministicPrefixCount + 1,
+                action = action,
+                before = directObservation.screen,
+                after = next.screen,
+                verification = postcondition.detail,
+                mechanism = "semantic_node",
+                startedMs = fastPathStartedMs
             )
             return success("${actionLabel(action).replaceFirstChar(Char::uppercase)} completed.")
         }
@@ -336,7 +549,14 @@ class UiAutomationOrchestrator(
             progress("Plan ${actionIndex + 1}", "Choosing the next UI action")
             
             var rawPlan = plan(goal, observation, actionHistory, goalAppCandidates)
-                ?: return@execution failure("The UI planner returned no usable plan.")
+                ?: return@execution failure(
+                    if (actionModelUnavailable) {
+                        "This request requires reasoning, but no eligible Action Model is available. " +
+                            "Select or download a non-Codex Action Model in Settings."
+                    } else {
+                        "The UI planner returned no usable plan."
+                    }
+                )
             var parsedPlan = parsePlan(rawPlan, goal, observation)
             
             var retries = 0
@@ -746,7 +966,7 @@ class UiAutomationOrchestrator(
                 "${actionLabel(action)}: ${observation.screen.packageName} → ${next.screen.packageName}"
             )
             val stepRecord = ActionStepRecord(
-                sequence = actionIndex + 1,
+                sequence = actionIndex + 1 + deterministicPrefixCount,
                 observation = observation.screen.screenId,
                 reasoningSummary = actionLabel(action),
                 action = actionLabel(action),
@@ -821,7 +1041,8 @@ class UiAutomationOrchestrator(
         val indexedMs = monotonicNowMs()
         var screenshotPath: String? = null
         val artifactPaths = mutableListOf<String>()
-        val needsVisionFallback = screenState.plannerElements().isEmpty() && shouldAttachScreenshot(jsonRetry = false)
+        val needsVisionFallback = screenState.plannerElements().isEmpty() &&
+            activeBackend?.let { shouldAttachScreenshot(it, jsonRetry = false) } == true
         if ((requestScreenshot || needsVisionFallback) &&
             android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
         ) {
@@ -996,15 +1217,45 @@ class UiAutomationOrchestrator(
         goalAppCandidates: List<DeviceAction.AppCandidate>,
         jsonRetry: Boolean = false
     ): String? {
+        val modelAcquireStartedMs = monotonicNowMs()
+        val wasReady = activeBackend != null || backendReadyProvider()
+        if (!modelRoutePublished) {
+            trace(
+                "routing_completed",
+                mapOf(
+                    "route" to "action_model",
+                    "model_required" to true,
+                    "model_initialization_on_critical_path" to !wasReady,
+                    "app_resolution_ms" to appResolutionDurationMs
+                )
+            )
+            modelRoutePublished = true
+        }
+        val plannerBackend = activeBackend ?: backendProvider()?.also {
+            activeBackend = it
+            backendLeaseAcquired = true
+        }
+        if (plannerBackend == null) {
+            actionModelUnavailable = true
+            trace("planner_unavailable", mapOf("reason_code" to "no_eligible_action_model"))
+            return null
+        }
+        trace(
+            "model_backend_acquired",
+            mapOf(
+                "was_ready" to wasReady,
+                "acquisition_ms" to (monotonicNowMs() - modelAcquireStartedMs)
+            )
+        )
         trace(
             "planner_request_started",
             mapOf("screen_id" to observation.screen.screenId, "json_retry" to jsonRetry)
         )
         val userContent = buildPlannerInput(goal, observation.screen, history, goalAppCandidates)
-        val attachScreenshot = observation.screenshotPath != null && shouldAttachScreenshot(jsonRetry)
+        val attachScreenshot = observation.screenshotPath != null && shouldAttachScreenshot(plannerBackend, jsonRetry)
         logger(
-            "UiAutomation planner input backend=${backend::class.java.simpleName} " +
-                "runtime=${backend.runtimeDescription()} jsonRetry=$jsonRetry screenshot=$attachScreenshot"
+            "UiAutomation planner input backend=${plannerBackend::class.java.simpleName} " +
+                "runtime=${plannerBackend.runtimeDescription()} jsonRetry=$jsonRetry screenshot=$attachScreenshot"
         )
         val images = if (attachScreenshot) {
             observation.screenshotPath
@@ -1024,7 +1275,7 @@ class UiAutomationOrchestrator(
         )
         val structuredStartedMs = monotonicNowMs()
         val structuredResult = try {
-            backend.generateStructured(conversation, UI_DECISION_TOOLS)
+            plannerBackend.generateStructured(conversation, UI_DECISION_TOOLS)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -1075,7 +1326,7 @@ class UiAutomationOrchestrator(
         val firstResponse = AtomicBoolean(false)
         val output = StringBuilder()
         val plannerStartedMs = monotonicNowMs()
-        backend.sendMessage(conversation) { partial, done ->
+        plannerBackend.sendMessage(conversation) { partial, done ->
             if (partial.isNotEmpty()) {
                 if (firstResponse.compareAndSet(false, true)) {
                     trace("planner_first_response", mapOf("native_structured" to false))
@@ -1105,7 +1356,7 @@ class UiAutomationOrchestrator(
         }
     }
 
-    private fun shouldAttachScreenshot(jsonRetry: Boolean): Boolean {
+    private fun shouldAttachScreenshot(backend: LlmBackend, jsonRetry: Boolean): Boolean {
         if (jsonRetry || !backend.supportsImageInput()) return false
         return backend !is LiteRtLmBackend && !backend.runtimeDescription().startsWith("LITERT-LM")
     }
@@ -1113,6 +1364,135 @@ class UiAutomationOrchestrator(
     private fun isDeviceLocked(): Boolean {
         val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
         return keyguardManager?.isDeviceLocked == true
+    }
+
+    private suspend fun executeRequestLevelAction(action: UiActionStep, goal: String): ToolResult {
+        val policy = AutomationIntentPolicy.evaluate(
+            action,
+            PolicyContext(
+                isScheduled = isScheduled,
+                isDeviceLocked = isDeviceLocked(),
+                destinationProvenance = "deterministic_request",
+                context = context
+            )
+        )
+        when (policy) {
+            is IntentPolicyDecision.Block -> return failure("Action blocked by policy: ${policy.reason}")
+            is IntentPolicyDecision.RequireConfirmation -> {
+                progress("Confirm", policy.reason)
+                if (!requestConfirmation(policy.preview?.let { "${policy.reason}\n\n$it" } ?: policy.reason)) {
+                    return failure("Action cancelled because confirmation was not granted.")
+                }
+            }
+            IntentPolicyDecision.Allow -> Unit
+        }
+
+        val started = markPhysicalActionDispatch(action)
+        val result = when (action) {
+            is UiActionStep.OpenApp -> DeviceAction.openApp(context, action.packageName, "")
+                .let { if (it.isError) failure(it.message) else success(it.message) }
+            else -> {
+                val token = globalToken(action)
+                    ?: return completePhysicalAction(
+                        action,
+                        started,
+                        failure("Unsupported deterministic request action for '$goal'."),
+                        "request_fast_path"
+                    )
+                val succeeded = runCatching {
+                    com.mewmix.nabu.accessibility.NabuAccessibilityService.instance
+                        ?.performTrustedGlobalAction(token) == true
+                }.getOrElse { error ->
+                    return completePhysicalAction(
+                        action,
+                        started,
+                        failure(error.message ?: "Global action '$token' failed."),
+                        "global_action"
+                    )
+                }
+                if (succeeded) success("${actionLabel(action)} completed.")
+                else failure("Global action '$token' failed.")
+            }
+        }
+        return completePhysicalAction(
+            action,
+            started,
+            result,
+            if (action is UiActionStep.OpenApp) "trusted_intent" else "global_action"
+        )
+    }
+
+    private fun verifyRequestLevelAction(
+        action: UiActionStep,
+        before: UiScreenState?,
+        after: UiScreenState
+    ): Pair<Boolean, String> {
+        if (action is UiActionStep.OpenApp) {
+            val verified = after.packageName.equals(action.packageName, ignoreCase = true)
+            return if (verified) {
+                true to "Opened ${after.packageName} and verified it in the foreground."
+            } else {
+                false to "Expected ${action.packageName} to foreground, but observed ${after.packageName}."
+            }
+        }
+        val source = before
+            ?: return false to "No trusted pre-action screen was available to verify ${actionLabel(action)}."
+        val result = UiActionPostconditionVerifier.verify(action, source, after)
+        return (result.status == PostconditionStatus.VERIFIED) to result.detail
+    }
+
+    private fun directRequestProgress(resolution: DirectRequestResolution.Resolved): String =
+        when (val action = resolution.action) {
+            is UiActionStep.OpenApp -> "Opening ${resolution.displayLabel ?: action.packageName}"
+            else -> actionLabel(action).replaceFirstChar(Char::uppercase)
+    }
+
+    private fun globalToken(action: UiActionStep): String? = when (action) {
+        UiActionStep.PressBack -> "back"
+        UiActionStep.PressHome -> "home"
+        UiActionStep.PressRecents -> "recents"
+        UiActionStep.OpenNotifications -> "notifications"
+        UiActionStep.OpenQuickSettings -> "quick_settings"
+        is UiActionStep.GlobalAction -> action.action
+        else -> null
+    }
+
+    private fun publishFastPathReceipt(
+        sequence: Int,
+        action: UiActionStep,
+        before: UiScreenState?,
+        after: UiScreenState,
+        verification: String,
+        mechanism: String,
+        startedMs: Long
+    ) {
+        activeSessionId?.let { sessionId ->
+            AutomationSessionManager.actionCompleted(
+                sessionId,
+                "${actionLabel(action)}: ${before?.packageName ?: "request"} → ${after.packageName}"
+            )
+        }
+        onStepRecord?.invoke(
+            ActionStepRecord(
+                sequence = sequence,
+                observation = before?.screenId ?: "request_level",
+                reasoningSummary = "Deterministic ${actionLabel(action)}",
+                action = actionLabel(action),
+                target = getTargetLabel(action, before ?: after),
+                result = "succeeded",
+                postActionObservation = after.screenId,
+                verification = verification,
+                latencyMs = (monotonicNowMs() - startedMs).coerceAtLeast(0L),
+                sourcePackage = before?.packageName,
+                resultPackage = after.packageName,
+                actionFamily = actionFamily(action),
+                semanticAction = actionLabel(action),
+                executionMechanism = mechanism,
+                verificationStatus = PostconditionStatus.VERIFIED.name.lowercase(),
+                sourceWindow = before?.activityName,
+                resultWindow = after.activityName
+            )
+        )
     }
 
     private suspend fun execute(action: UiActionStep, observation: Observation, sessionId: String, goal: String): ToolResult {
@@ -1622,7 +2002,8 @@ class UiAutomationOrchestrator(
         if (isCompactLocalPlanner()) MAX_LOCAL_PROMPT_ELEMENTS else MAX_PROMPT_ELEMENTS
 
     private fun isCompactLocalPlanner(): Boolean =
-        backend is LiteRtLmBackend || backend.runtimeDescription().startsWith("LITERT-LM")
+        activeBackend is LiteRtLmBackend ||
+            activeBackend?.runtimeDescription()?.startsWith("LITERT-LM") == true
 
     private fun describeConfirmation(action: UiActionStep, reason: String, screen: UiScreenState, goal: String, destination: String?): String {
         val contextLines = screen.elements
@@ -1856,6 +2237,7 @@ class UiAutomationOrchestrator(
 
     companion object {
         const val CONTROL_UI_TOOL = "control_ui"
+        private const val TRUSTED_EVENT_MAX_AGE_MS = 2_000L
         val sessionMutex = Mutex()
         private const val MAX_PROMPT_ELEMENTS = 32
         private const val MAX_LOCAL_PROMPT_ELEMENTS = 12

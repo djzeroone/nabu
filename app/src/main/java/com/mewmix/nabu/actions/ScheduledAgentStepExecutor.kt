@@ -200,7 +200,18 @@ object ScheduledAgentStepExecutor {
             }
             return UiAutomationOrchestrator(
                 context = context,
-                backend = backend,
+                backendProvider = {
+                    com.mewmix.nabu.uiagent.ActionRequestDispatcher
+                        .acquireEligibleActionBackend(context)
+                },
+                backendReadyProvider = {
+                    com.mewmix.nabu.uiagent.ActionRequestDispatcher
+                        .isEligibleActionBackendReady(context)
+                },
+                onBackendReleased = {
+                    com.mewmix.nabu.uiagent.ActionRequestDispatcher
+                        .releaseEligibleActionBackend(context)
+                },
                 isScheduled = true,
                 requestConfirmation = { false },
                 logger = { DebugLogger.log("Scheduled $it") }

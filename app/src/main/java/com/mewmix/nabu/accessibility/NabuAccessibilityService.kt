@@ -665,6 +665,21 @@ class NabuAccessibilityService : AccessibilityService() {
             emptySet()
         }
 
+    /** Runtime-advertised globals are safe to route before a UI hierarchy capture. */
+    fun availableGlobalActionTokens(): Set<String> = synchronized(observationLock) {
+        currentSystemActionTokens()
+    }
+
+    fun performTrustedGlobalAction(token: String): Boolean = synchronized(observationLock) {
+        val action = GlobalSystemAction.fromToken(token)
+            ?: throw IllegalArgumentException("Unsupported global_action: $token")
+        require(action.plannerAllowed) { "Global action '$token' is reserved for explicit trusted use." }
+        require(action.token in currentSystemActionTokens()) {
+            "Global action '$token' is unavailable on this device."
+        }
+        performGlobalAction(action.actionId)
+    }
+
     private fun writeHierarchy(
         root: AccessibilityNodeInfo,
         window: AccessibilityWindowInfo?,

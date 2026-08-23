@@ -40,12 +40,16 @@ object ActionRequestDispatcher {
     private var activeJob: Job? = null
     private val ownership = ActionRequestOwnership()
     private var cachedBackend: Pair<String, LlmBackend>? = null
+    private var backendUseCount = 0
+    private var pendingBackendCloseReason: String? = null
     private var idleUnloadJob: Job? = null
     private var accessibilityConnected = false
     private val _actionModelLifecycle = MutableStateFlow(ActionModelLifecycleState())
     val actionModelLifecycle = _actionModelLifecycle.asStateFlow()
     private val metricRuntimeEvents = setOf(
         "observation_captured",
+        "routing_started",
+        "routing_completed",
         "planner_request_started",
         "planner_first_response",
         "planner_output_received",
@@ -72,7 +76,7 @@ object ActionRequestDispatcher {
             val newSession = ActionSession(
                 id = UUID.randomUUID().toString(),
                 mode = mode,
-                status = ActionSessionStatus.PLANNING,
+                status = ActionSessionStatus.ROUTING,
                 originalGoal = normalized,
                 currentGoal = normalized,
                 metrics = ActionSessionMetrics(
@@ -139,7 +143,7 @@ object ActionRequestDispatcher {
             activeJob?.cancel()
             val updated = current.copy(
                 currentGoal = normalized,
-                status = ActionSessionStatus.PLANNING,
+                status = ActionSessionStatus.ROUTING,
                 updatedAtMs = System.currentTimeMillis()
             )
             val epoch = ownership.begin(updated.id)
@@ -239,12 +243,46 @@ object ActionRequestDispatcher {
         if (!SettingsManager.keepActionModelReady(context)) return
         val appContext = context.applicationContext
         scope.launch {
-            dispatchMutex.withLock {
-                DebugLogger.log("$TAG: warming Action Model reason=$reason")
-                resolveOrInitBackend(appContext, preferredModelId = null)
-            }
+            DebugLogger.log("$TAG: warming Action Model reason=$reason")
+            resolveOrInitBackend(appContext, preferredModelId = null)
         }
     }
+
+    internal suspend fun acquireEligibleActionBackend(
+        context: Context,
+        preferredModelId: String? = null
+    ): LlmBackend? = backendMutex.withLock {
+        val backend = resolveOrInitBackendLocked(context.applicationContext, preferredModelId)
+        if (backend != null && synchronized(lock) { cachedBackend?.second === backend }) {
+            synchronized(lock) { backendUseCount += 1 }
+        }
+        backend
+    }
+
+    internal fun releaseEligibleActionBackend(context: Context) {
+        val appContext = context.applicationContext
+        scope.launch {
+            var warmAfterClose = false
+            backendMutex.withLock {
+                val closeReason = synchronized(lock) {
+                    backendUseCount = (backendUseCount - 1).coerceAtLeast(0)
+                    pendingBackendCloseReason.takeIf { backendUseCount == 0 }
+                        ?.also { pendingBackendCloseReason = null }
+                }
+                if (closeReason != null) {
+                    closeCachedBackendLocked(closeReason)
+                    warmAfterClose = SettingsManager.keepActionModelReady(appContext) &&
+                        synchronized(lock) { accessibilityConnected }
+                }
+            }
+            if (warmAfterClose) resolveOrInitBackend(appContext, preferredModelId = null)
+        }
+    }
+
+    internal fun isEligibleActionBackendReady(
+        context: Context,
+        preferredModelId: String? = null
+    ): Boolean = isConfiguredBackendReady(context.applicationContext, preferredModelId)
 
     fun onTrimMemory(level: Int) {
         if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
@@ -260,7 +298,7 @@ object ActionRequestDispatcher {
             val current = _activeSession.value ?: return
             if (current.id != sessionId) return
             // If currently running, suspend execution safely
-            if (current.status in listOf(ActionSessionStatus.PLANNING, ActionSessionStatus.OBSERVING, ActionSessionStatus.EXECUTING, ActionSessionStatus.VERIFYING)) {
+            if (current.status in listOf(ActionSessionStatus.ROUTING, ActionSessionStatus.PLANNING, ActionSessionStatus.OBSERVING, ActionSessionStatus.EXECUTING, ActionSessionStatus.VERIFYING)) {
                 AutomationSessionManager.suspendActive("Handoff to Chat screen requested by user.")
             }
             activeJob?.cancel()
@@ -291,13 +329,6 @@ object ActionRequestDispatcher {
         onStep: ((ActionStepRecord) -> Unit)?,
         epoch: Long
     ): ToolResult {
-        val backend = resolveOrInitBackend(context, preferredModelId)
-            ?: return ToolResult(
-                toolName = UiAutomationOrchestrator.CONTROL_UI_TOOL,
-                output = "No LLM model is downloaded or available for action execution.",
-                isError = true
-            )
-
         val turn = ActionConversationTurn(
             userRequest = goal,
             timestampMs = System.currentTimeMillis()
@@ -306,7 +337,9 @@ object ActionRequestDispatcher {
 
         val orchestrator = UiAutomationOrchestrator(
             context = context,
-            backend = backend,
+            backendProvider = { acquireEligibleActionBackend(context, preferredModelId) },
+            backendReadyProvider = { isConfiguredBackendReady(context, preferredModelId) },
+            onBackendReleased = { releaseEligibleActionBackend(context) },
             requestConfirmation = requestConfirmation ?: { prompt ->
                 // If no confirmation requester is provided (e.g. non-interactive background),
                 // reject potentially destructive unconfirmed actions safely.
@@ -407,14 +440,27 @@ object ActionRequestDispatcher {
     private suspend fun resolveOrInitBackend(context: Context, preferredModelId: String?): LlmBackend? =
         backendMutex.withLock { resolveOrInitBackendLocked(context, preferredModelId) }
 
+    private fun isConfiguredBackendReady(context: Context, preferredModelId: String?): Boolean {
+        val cachedId = synchronized(lock) { cachedBackend?.first } ?: return false
+        val configuredId = preferredModelId?.takeIf(String::isNotBlank)
+            ?: SettingsManager.getActionModelId(context)
+        return configuredId.isNullOrBlank() ||
+            cachedId == configuredId ||
+            cachedId.contains(configuredId, ignoreCase = true)
+    }
+
     private suspend fun resolveOrInitBackendLocked(
         context: Context,
         preferredModelId: String?
     ): LlmBackend? = withContext(Dispatchers.IO) {
         val modelManager = ModelManager(context)
-        val downloaded = modelManager.models.filter { it.isDownloaded && it.type == ModelType.LLM }
+        val downloaded = modelManager.models.filter {
+            it.isDownloaded && ActionModelEligibility.isEligible(it)
+        }
         val remote = OAuthRemoteModels.connectedModels(context)
-        val available = (downloaded + remote).distinctBy { it.id }
+        val available = (downloaded + remote)
+            .filter(ActionModelEligibility::isEligible)
+            .distinctBy { it.id }
         if (available.isEmpty()) return@withContext null
 
         val configuredModelId = preferredModelId?.takeIf(String::isNotBlank)
@@ -451,6 +497,10 @@ object ActionRequestDispatcher {
                     )
                     return@withContext backend
                 } else {
+                    if (backendUseCount > 0) {
+                        pendingBackendCloseReason = "model_selection_changed"
+                        return@withContext null
+                    }
                     runCatching { backend.close() }
                     cachedBackend = null
                 }
@@ -523,6 +573,14 @@ object ActionRequestDispatcher {
     }
 
     private suspend fun closeCachedBackend(reason: String) = backendMutex.withLock {
+        if (synchronized(lock) { backendUseCount > 0 }) {
+            synchronized(lock) { pendingBackendCloseReason = reason }
+            return@withLock
+        }
+        closeCachedBackendLocked(reason)
+    }
+
+    private fun closeCachedBackendLocked(reason: String) {
         val cached = synchronized(lock) {
             cachedBackend.also { cachedBackend = null }
         }

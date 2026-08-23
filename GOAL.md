@@ -3232,3 +3232,201 @@ The goal is not:
 The goal is:
 
     a coherent Android action runtime.
+
+======================================================================
+52. ACTION RUNTIME LATENCY OPTIMIZATION ADDENDUM
+======================================================================
+
+The coherent runtime must also minimize Nabu-owned latency without weakening observation
+custody, validation, confirmation, execution, or verification.
+
+Profile before and after each optimization. Use the production monotonic timing boundaries from
+Section 27, record actual measurements, and retain a correctness-preserving fallback. Do not
+claim an improvement from source inspection alone.
+
+A. KEEP THE ACTION MODEL WARM
+
+The selected Action Model currently remains cached after creation, but the first shortcut request
+can still pay synchronous resolution and initialization costs.
+
+Add an explicit lifecycle:
+
+    selected
+        ↓
+    background warmup
+        ↓
+    READY
+        ↓
+    shortcut request
+        ↓
+    immediate inference
+
+Keep it warm while Accessibility is enabled or an action session was recently active. After a
+configurable idle interval, approximately 5–10 minutes, allow unloading under memory pressure.
+Expose a user setting such as:
+
+    Keep Action Model ready      ON
+
+Changing the selected Action Model must invalidate and warm the correct backend. Warmup must not
+create a duplicate backend, race an active request, leak the old backend, or block the UI thread.
+Benchmark cold and warm invocation-to-first-action latency.
+
+B. USE A ONE-STEP-NATIVE ACTION MODEL PROTOCOL
+
+The Action Model must not spend tokens generating speculative multi-action plans when the runtime
+can safely execute only `planHorizon.firstExecutionSlice()` before re-observation.
+
+The compact decision protocol should represent exactly one of:
+
+    ACT     one physical mutation plus its immediate expected postcondition
+    ASK     one question or confirmation boundary
+    DONE    objective complete or safely failed
+
+Continue receding-horizon planning, but make one mutation per observation the native schema and
+prompt contract. Retain strict structured decoding and recovery. Measure output tokens, malformed
+decision retries, model duration, and invocation-to-first-action before and after the change.
+
+C. ADD A DIRECT SEMANTIC FAST PATH BEFORE MODEL INFERENCE
+
+Expand deterministic routing for unambiguous, safe requests such as:
+
+    open notifications      → runtime-advertised GLOBAL_ACTION_NOTIFICATIONS
+    show quick settings     → runtime-advertised GLOBAL_ACTION_QUICK_SETTINGS
+    go home                 → runtime-advertised GLOBAL_ACTION_HOME
+    go back                 → runtime-advertised GLOBAL_ACTION_BACK
+    open Telegram           → exact installed-app resolution and trusted Intent
+    tap Search              → exactly one visible matching node and ACTION_CLICK
+    scroll down             → exactly one relevant scrollable node and semantic scroll
+
+The fast path is permitted only when intent and target resolution are unique and policy-safe.
+It must still use the exact observation lease, `UiActionValidator`, consequence/confirmation
+policy, executor, postcondition verifier, trace, and receipt. Ambiguous or unsupported requests
+fall through to the Action Model. A phrase such as `tap Send` must not bypass confirmation.
+
+D. REMOVE DUPLICATE INITIAL UI CAPTURE
+
+Replace the preflight-only `forceCaptureSnapshot()` followed by the orchestrator's second forced
+capture with a probe that may carry the initial snapshot:
+
+    data class ControlPlaneProbe(
+        val serviceReady: Boolean,
+        val snapshot: UiSnapshot?
+    )
+
+Reuse the preflight snapshot only if its package/window/fingerprint/rotation/display authority is
+still current when the target app remained foreground. If Chat or another entry Activity must be
+parked first, discard it and capture the newly foregrounded target. Reuse must never weaken the
+single-use observation lease or authorize an action from a superseded window.
+
+E. PROMOTE TRUSTWORTHY EVENT SNAPSHOTS AFTER ACTIONS
+
+Avoid an unconditional settle delay plus full hierarchy traversal after Android has already
+published a newer event snapshot. Add an observation-lock operation equivalent to:
+
+    promoteSnapshotForAction(expectedSequence, expectedFingerprint)
+
+It must atomically prove that the event snapshot is still the latest screen, bind fresh exact
+single-use action authority, and return it without rebuilding the hierarchy. If the snapshot is
+incomplete, superseded, unstable, or does not satisfy the expected transition/postcondition,
+continue waiting or force a fresh capture. Never promote stale or partial evidence.
+
+F. USE LEADING-EDGE COALESCING FOR ACCESSIBILITY EVENTS
+
+Replace trailing-only debounce with a correctness-preserving coalescer:
+
+    first meaningful event
+        → capture immediately or on the next frame
+    event storm
+        → coalesce redundant work
+    quiet period
+        → optional trailing settled capture
+
+The orchestrator may use the leading snapshot when it already proves the postcondition; otherwise
+it waits for later evidence. Preserve a trailing capture for animations and rapidly mutating
+windows. Benchmark event-to-observation-ready latency and hierarchy traversals per action.
+
+G. RESOLVE OBSERVED TARGETS BY VERIFIED TREE PATH FIRST
+
+Carry the trusted observed node's tree path internally. After rebuilding the live screen and
+validating the full observation fingerprint, resolve:
+
+    root → child index → ... → target
+
+Then verify resource ID, class, bounds, and node signature against the observed target before
+acting. Fall back to existing semantic lookup only when safe; path drift should normally trigger
+re-observation rather than a best-effort action. Do not remove full-screen fingerprint validation.
+
+H. REUSE THE CAPABILITY-SENSITIVE SNAPSHOT FINGERPRINT AS SCREEN ID
+
+Profile the duplicate work in `UiTreeIndexer.build()`. If tests prove equivalent identity
+semantics, use `UiSnapshot.stateFingerprint` as `UiScreenState.screenId` instead of constructing
+and hashing another large screen description. Keep stable element IDs separately. Preserve every
+existing stale-state and screen-identity invariant, and retain the separate hash if equivalence
+cannot be proven.
+
+LATENCY ADDENDUM DEFINITION OF DONE
+
+    ✓ cold and warm Action Model lifecycle is explicit, race-safe, and measured
+    ✓ Action Model emits one mutation per observation natively
+    ✓ deterministic semantic fast paths bypass reasoning but never safety
+    ✓ unchanged foreground state does not require duplicate initial capture
+    ✓ trustworthy event snapshots can become fresh action authority without recapture
+    ✓ Accessibility events provide early evidence plus a settled trailing state
+    ✓ target lookup uses verified tree paths without weakening the observation fingerprint
+    ✓ duplicate screen hashing is removed only if identity-equivalence tests prove it safe
+    ✓ before/after runtime measurements report TTFA and component latency changes
+
+======================================================================
+53. DETERMINISTIC ROUTING MUST PRECEDE ACTION MODEL INITIALIZATION
+======================================================================
+
+Model inference is the fallback, not the default action-runtime entry step. A new action session
+starts in `ROUTING`, never `PLANNING`. Request execution must not resolve, initialize, or wait for
+the configured Action Model merely to decide whether the request needs reasoning.
+
+Required order:
+
+    request
+        → request-level deterministic resolution
+        → execute / observe / verify when fully resolved
+        → otherwise capture the current UI
+        → observation-level exact semantic resolution
+        → execute / observe / verify when uniquely resolved
+        → otherwise PLANNING and lazy Action Model acquisition
+
+Before an initial UI-tree capture, conservatively resolve exact unique installed-app launches,
+runtime-supported global Accessibility actions, complete trusted `DeviceAction` operations, and
+other unambiguous non-UI Android operations. Cache normalized launcher metadata and refresh it on
+application startup and package add/remove/change broadcasts. Never guess among duplicate or
+partial app-label matches. A successful launch API return is not completion: observe and verify
+that the expected package/window actually foregrounded.
+
+After observation, resolve exact unique capability-backed node actions including click, semantic
+scroll, focus, expand/collapse, and explicit set-progress where defensible. Ambiguity, incomplete
+arguments, safety uncertainty, or required semantic interpretation falls through to the Action
+Model. Every deterministic mutation uses the canonical action representation and the same policy,
+confirmation, destination, observation-lease, executor, verification, trace, cancellation, and
+session-ownership invariants as a model-selected mutation.
+
+Configured Action Model warmup remains asynchronous and independent. A deterministic request must
+not wait for `WARMING → READY`; the backend is acquired only immediately before a real planner
+request. Complex goals may execute independently obvious deterministic prefixes before reasoning.
+
+Codex remains eligible to supervise or invoke `control_ui`, but is never an Action Model for an
+Accessibility shortcut, Quick Settings entry, voice action entry, temporary action conversation,
+or inner observe/act/verify loop. Apply one canonical eligibility predicate to Settings selection,
+preferred-model resolution, warmup, dispatcher fallback, and backend acquisition.
+
+Instrument `request_received`, `routing_started`, `routing_completed`, route
+(`request_fast_path`, `ui_semantic_fast_path`, or `action_model`), `model_required`, app resolution,
+initial observation, time to first action, verification, planner request count, and whether model
+initialization was on the critical path. Exact app/global/UI fast-path regressions must assert zero
+planner calls; deterministic routing must still succeed while the configured Action Model is
+unavailable or warming. Add negative tests for ambiguous app labels and UI targets, consequential
+confirmation, stale UI rejection, and clear failure when reasoning is required but no eligible
+Action Model is available.
+
+Architectural invariant:
+
+    Kotlin does everything Kotlin can prove.
+    The Action Model resolves only ambiguity or semantic intent Kotlin cannot prove.

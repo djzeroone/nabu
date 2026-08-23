@@ -8,6 +8,36 @@ import org.junit.Test
 class ActionSessionTest {
 
     @Test
+    fun routing_state_and_metrics_precede_planning() {
+        assertEquals(
+            ActionSessionStatus.ROUTING,
+            actionStatusForProgress("Routing request", ActionSessionStatus.IDLE)
+        )
+        val routed = ActionSessionMetrics(requestReceivedMs = 900L)
+            .recordRuntimeEvent("routing_started", 1_000L)
+            .recordRuntimeEvent(
+                "routing_completed",
+                1_010L,
+                mapOf(
+                    "model_required" to false,
+                    "model_initialization_on_critical_path" to false,
+                    "app_resolution_ms" to 3L
+                )
+            )
+        assertEquals(1_000L, routed.routingStartedMs)
+        assertEquals(1_010L, routed.routingCompletedMs)
+        assertEquals(0L, routed.plannerRequestCount)
+        assertEquals(0L, routed.modelRequired)
+        assertEquals(0L, routed.modelInitializationOnCriticalPath)
+        assertEquals(3L, routed.appResolutionMs)
+
+        val planned = routed
+            .recordRuntimeEvent("planner_request_started", 1_020L)
+            .recordRuntimeEvent("planner_request_started", 1_030L)
+        assertEquals(2L, planned.plannerRequestCount)
+    }
+
+    @Test
     fun actionSession_initializesWithCorrectDefaults() {
         val session = ActionSession(
             originalGoal = "Open Telegram and send hello",

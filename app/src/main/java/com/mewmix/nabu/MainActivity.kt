@@ -127,6 +127,7 @@ class MyApplication : Application() {
         com.mewmix.nabu.utils.DebugLogger.initialize(this)
         com.mewmix.nabu.uiagent.AutomationSessionManager.initialize(this)
         com.mewmix.nabu.uiagent.AutomationMediaManager.purgeAllCaptures(this)
+        com.mewmix.nabu.actions.DeviceAction.initializeInstalledAppIndex(this)
 
         // Global uncaught exception handler to capture stack traces in our log
         Thread.setDefaultUncaughtExceptionHandler { t, e ->

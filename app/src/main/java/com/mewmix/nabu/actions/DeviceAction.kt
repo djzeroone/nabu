@@ -2,8 +2,10 @@ package com.mewmix.nabu.actions
 
 import android.Manifest
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -25,7 +27,12 @@ object DeviceAction {
     data class AppCandidate(
         val label: String,
         val packageName: String
-    )
+    ) {
+        val normalizedLabel: String = label.lowercase()
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+        val launchable: Boolean = true
+    }
 
     private data class ResolvedRecipient(
         val phoneNumber: String,
@@ -36,6 +43,42 @@ object DeviceAction {
         val message: String,
         val isError: Boolean = false
     )
+
+    private val installedAppIndexLock = Any()
+    @Volatile private var installedAppIndex: List<AppCandidate>? = null
+    @Volatile private var packageReceiverRegistered = false
+
+    fun initializeInstalledAppIndex(context: Context) {
+        val appContext = context.applicationContext
+        refreshInstalledAppIndex(appContext)
+        synchronized(installedAppIndexLock) {
+            if (packageReceiverRegistered) return
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_PACKAGE_ADDED)
+                addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addAction(Intent.ACTION_PACKAGE_CHANGED)
+                addDataScheme("package")
+            }
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    refreshInstalledAppIndex(context.applicationContext)
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                appContext.registerReceiver(receiver, filter)
+            }
+            packageReceiverRegistered = true
+        }
+    }
+
+    fun launchableAppIndex(context: Context): List<AppCandidate> = listLaunchableApps(context)
+
+    fun refreshInstalledAppIndex(context: Context) {
+        installedAppIndex = queryLaunchableApps(context.applicationContext)
+    }
 
     internal var canResolveIntent: (Context, Intent) -> Boolean = { context, intent ->
         if (intent.action?.startsWith("android.settings") == true || intent.action == Settings.ACTION_SETTINGS) {
@@ -620,6 +663,15 @@ object DeviceAction {
     }
 
     private fun listLaunchableApps(context: Context): List<AppCandidate> {
+        installedAppIndex?.let { return it }
+        return synchronized(installedAppIndexLock) {
+            installedAppIndex ?: queryLaunchableApps(context.applicationContext).also {
+                installedAppIndex = it
+            }
+        }
+    }
+
+    private fun queryLaunchableApps(context: Context): List<AppCandidate> {
         val packageManager = context.packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         return packageManager.queryIntentActivities(launcherIntent, 0)
