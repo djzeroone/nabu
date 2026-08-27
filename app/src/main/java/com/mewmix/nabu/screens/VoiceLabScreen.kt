@@ -54,12 +54,13 @@ import com.mewmix.nabu.ui.brutalist.PanelRow
 import com.mewmix.nabu.utils.KokoroAudioPlayer
 import com.mewmix.nabu.utils.PlayerState
 import com.mewmix.nabu.utils.formatBytes
-import com.mewmix.nabu.utils.saveAudio
+import com.mewmix.nabu.utils.saveAudioWithDisplayName
 import com.mewmix.nabu.voicelab.VoiceLabEngineInfo
 import com.mewmix.nabu.voicelab.VoiceLabParameter
 import com.mewmix.nabu.voicelab.VoiceLabRepository
 import com.mewmix.nabu.voicelab.VoiceLabRequest
 import com.mewmix.nabu.voicelab.VoiceLabSynthesisResult
+import com.mewmix.nabu.voicelab.VoiceLabText
 import com.mewmix.nabu.voicelab.VoiceLabVoice
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -242,7 +243,7 @@ fun VoiceLabScreen() {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     BrutalButton(
-                        onClick = { render(previewText(script)) },
+                        onClick = { render(VoiceLabText.previewText(script)) },
                         enabled = !isRendering && selectedEngine?.isAvailable == true
                     ) {
                         Text(if (isRendering) "Rendering" else "Preview Voice")
@@ -279,7 +280,12 @@ fun VoiceLabScreen() {
                     },
                     onExport = {
                         lastResult?.let {
-                            saveAudio(it.audio, context, "${it.engineId}_${it.voiceId ?: "default"}", it.sampleRate)
+                            saveAudioWithDisplayName(
+                                audioData = it.audio,
+                                context = context,
+                                displayName = "VOICE_LAB_${it.engineId}_${it.voiceId ?: "default"}",
+                                sampleRate = it.sampleRate
+                            )
                         }
                     }
                 )
@@ -558,10 +564,3 @@ private fun VoiceLabParameter.defaultAsString(): String =
         is VoiceLabParameter.IntValue -> defaultValue.toString()
         is VoiceLabParameter.ChoiceValue -> defaultValue
     }
-
-private fun previewText(text: String): String {
-    val trimmed = text.trim()
-    if (trimmed.length <= 220) return trimmed
-    val firstSentence = Regex(".*?[.!?](\\s|$)").find(trimmed)?.value?.trim()
-    return firstSentence?.takeIf { it.length in 40..240 } ?: trimmed.take(220)
-}
