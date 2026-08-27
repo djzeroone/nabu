@@ -117,6 +117,7 @@ Nabu currently routes TTS through a small `TTSEngine` interface and `TTSManager`
 - Soprano accepts a `speed` argument through `TTSEngine`, but the current implementation does not appear to apply speed during generation. Voice Lab does not expose Soprano speed until implementation support is verified.
 - Exact Supertonic model size is determined from downloaded files on-device because the current Nabu model allowlist stores bundle URLs, not byte-size metadata.
 - Voice Lab currently stores recent preview renders only in memory for the active screen session.
+- Real-device audio smoke testing is still required. Use `docs/voice-lab-smoke-test.md` and copy confirmed render results back into this inventory.
 
 ## Licensing Inventory
 
@@ -139,4 +140,3 @@ This section records observed license metadata and files. It is not legal advice
 | ONNX Runtime Android | Microsoft / MIT-style ONNX Runtime license expected from dependency | `com.microsoft.onnxruntime:onnxruntime-android:1.20.0` | Runtime dependency | Include dependency notice in full third-party audit. |
 | IPA-Transcribers | Dependency license not reviewed here | `com.github.medavox:IPA-Transcribers:v0.2` | Kokoro phonemization fallback | Needs license lookup before commercial extraction. |
 | `org.jetbrains.bio:npy` | Dependency license not reviewed here | `org.jetbrains.bio:npy:0.3.5` | `.npy` voice-vector loading | Needs license lookup before commercial extraction. |
-
