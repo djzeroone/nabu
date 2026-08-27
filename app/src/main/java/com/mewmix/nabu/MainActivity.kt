@@ -10,6 +10,7 @@ import com.mewmix.nabu.screens.MoreScreen
 import com.mewmix.nabu.screens.ModelsScreen
 import com.mewmix.nabu.screens.DebugLogScreen
 import com.mewmix.nabu.screens.CreditsConstellationScreen
+import com.mewmix.nabu.screens.VoiceLabScreen
 import com.mewmix.nabu.galleryport.PerfHud
 import com.mewmix.nabu.api.ApiServerManager
 import com.mewmix.nabu.api.ApiServerBackgroundService
@@ -378,6 +379,7 @@ private fun screenFromString(name: String?): Screen = when (name) {
     "Creations" -> Screen.Creations
     "Settings" -> Screen.Settings
     "Models" -> Screen.Models
+    "VoiceLab" -> Screen.VoiceLab
     "DebugLog" -> Screen.DebugLog
     else -> Screen.Basic
 }
@@ -391,6 +393,7 @@ private fun screenToString(screen: Screen): String = when (screen) {
     Screen.Creations -> "Creations"
     Screen.Settings -> "Settings"
     Screen.Models -> "Models"
+    Screen.VoiceLab -> "VoiceLab"
     Screen.DebugLog -> "DebugLog"
     Screen.Credits -> "Credits"
 }
@@ -404,6 +407,7 @@ sealed class Screen {
     object Creations : Screen()
     object Settings : Screen()
     object Models : Screen()
+    object VoiceLab : Screen()
     object DebugLog : Screen()
     object Credits : Screen()
 }
@@ -522,6 +526,7 @@ fun MainScreen(
                             "Creations" -> Screen.Creations
                             "Settings" -> Screen.Settings
                             "Models" -> Screen.Models
+                            "VoiceLab" -> Screen.VoiceLab
                             "Credits" -> Screen.Credits
                             "DebugLog" -> Screen.DebugLog
                             else -> null
@@ -537,6 +542,7 @@ fun MainScreen(
                         userPreferencesRepository = userPreferencesRepository,
                         onModelArtifactsChanged = { viewModel.retryInitialization() }
                     )
+                    Screen.VoiceLab -> VoiceLabScreen()
                     Screen.Credits -> CreditsConstellationScreen()
                     Screen.DebugLog -> DebugLogScreen()
                 }
