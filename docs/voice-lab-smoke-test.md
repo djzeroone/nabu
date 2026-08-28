@@ -2,6 +2,8 @@
 
 Use this checklist for each device build before treating Voice Lab results as product evidence.
 
+Current quality baseline and remaining risk notes are tracked in `docs/voice-lab-quality-baseline.md`.
+
 ## Device Setup
 
 - Install the debug APK from `app/build/outputs/apk/debug/app-debug.apk`.

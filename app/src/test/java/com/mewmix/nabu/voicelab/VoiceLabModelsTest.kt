@@ -20,6 +20,17 @@ class VoiceLabModelsTest {
     }
 
     @Test
+    fun `preview and render text reject blank scripts`() {
+        assertEquals("", VoiceLabText.previewText(" \n\t "))
+        assertEquals(null, VoiceLabText.renderableTextOrNull(" \n\t "))
+    }
+
+    @Test
+    fun `render text trims surrounding whitespace`() {
+        assertEquals("Render this.", VoiceLabText.renderableTextOrNull("  Render this.\n"))
+    }
+
+    @Test
     fun `synthesis result reports duration realtime factor and wav size`() {
         val result = VoiceLabSynthesisResult(
             audio = FloatArray(48_000),

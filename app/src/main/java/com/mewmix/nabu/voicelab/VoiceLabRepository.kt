@@ -80,12 +80,15 @@ class VoiceLabRepository(
     }
 
     suspend fun synthesize(request: VoiceLabRequest): VoiceLabSynthesisResult {
+        val renderText = VoiceLabText.renderableTextOrNull(request.text)
+            ?: throw IllegalArgumentException("Enter script text before rendering.")
+        val renderRequest = request.copy(text = renderText)
         val started = SystemClock.elapsedRealtime()
         return when {
-            request.engineId == KOKORO_ID -> synthesizeKokoro(request, started)
-            request.engineId.startsWith("supertonic") -> synthesizeSupertonic(request, started)
-            request.engineId == SOPRANO_ID -> synthesizeSoprano(request, started)
-            else -> throw IllegalArgumentException("Unsupported Voice Lab engine: ${request.engineId}")
+            renderRequest.engineId == KOKORO_ID -> synthesizeKokoro(renderRequest, started)
+            renderRequest.engineId.startsWith("supertonic") -> synthesizeSupertonic(renderRequest, started)
+            renderRequest.engineId == SOPRANO_ID -> synthesizeSoprano(renderRequest, started)
+            else -> throw IllegalArgumentException("Unsupported Voice Lab engine: ${renderRequest.engineId}")
         }
     }
 

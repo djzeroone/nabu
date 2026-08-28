@@ -14,7 +14,7 @@ class GlobalRuntimeViewModelTest {
     @Test
     fun testInitialStateIsLoading() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        val viewModel = GlobalRuntimeViewModel(app)
+        val viewModel = GlobalRuntimeViewModel(app, initializeOnCreate = false)
         
         // Initial state should be Loading
         assertTrue(viewModel.modelState.value is ModelState.Loading)

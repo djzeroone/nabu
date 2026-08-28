@@ -123,6 +123,11 @@ fun VoiceLabScreen() {
 
     fun render(text: String) {
         val engine = selectedEngine ?: return
+        val renderText = VoiceLabText.renderableTextOrNull(text)
+        if (renderText == null) {
+            error = "Enter script text before rendering."
+            return
+        }
         if (!engine.isAvailable) {
             error = engine.status
             return
@@ -136,7 +141,7 @@ fun VoiceLabScreen() {
                         VoiceLabRequest(
                             engineId = engine.id,
                             voiceId = selectedVoiceId,
-                            text = text,
+                            text = renderText,
                             parameters = parameterValues.toMap()
                         )
                     )
