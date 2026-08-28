@@ -305,7 +305,7 @@ fun VoiceLabScreen() {
 
             if (recentResults.isNotEmpty()) {
                 item {
-                    Text("Recent Previews", style = MaterialTheme.typography.titleMedium)
+                    Text("Recent Renders", style = MaterialTheme.typography.titleMedium)
                 }
                 items(recentResults) { result ->
                     RecentRenderRow(
