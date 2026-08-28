@@ -58,3 +58,32 @@ After testing, update `docs/voice-lab-inventory.md` with:
 - export/playback problems
 
 Do not add subjective voice-quality ratings until a human evaluator supplies them.
+
+## Smoke Runs
+
+### 2026-08-27 Emulator: NabuVoiceLabApi35
+
+- Device: `sdk_gphone64_arm64`
+- Android: 15 / API 35
+- Install: `app-debug.apk` installed successfully
+- Navigation: first-run setup completed with default Kokoro selection; More -> Voice Lab opened successfully
+- Engine states:
+  - Kokoro: Ready, backend reported as `CPU/kokoro_int8`
+  - Supertonic 2: Download required
+  - Supertonic 3: Download required
+  - Soprano: Download required; missing `soprano_backbone_kv.onnx`, `soprano_decoder.onnx`, `soprano_decoder.onnx.data`, `tokenizer.json`
+- Kokoro preview:
+  - voice: `af_alloy`
+  - UI duration: 16.45s
+  - log backend/model: `kokoro_int8`, CPU
+  - playback started without crash in headless emulator
+- Export:
+  - exported file: `/sdcard/Music/VOICE_LAB_kokoro_af_alloy_20260827_205244.wav`
+  - pulled file size: 789,644 bytes
+  - local file inspection: RIFF/WAVE, 16-bit mono PCM, 24,000 Hz
+- Storage:
+  - app-private `files`: 88 MB
+  - copied Kokoro model: `files/models/kokoro-int8/model_int8.onnx`, 92,360,686 bytes
+- Not tested:
+  - audible voice quality, because emulator was booted headless with `-no-audio`
+  - Supertonic 2, Supertonic 3, and Soprano synthesis, because models were not downloaded

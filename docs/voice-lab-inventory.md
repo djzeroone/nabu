@@ -118,6 +118,7 @@ Nabu currently routes TTS through a small `TTSEngine` interface and `TTSManager`
 - Exact Supertonic model size is determined from downloaded files on-device because the current Nabu model allowlist stores bundle URLs, not byte-size metadata.
 - Voice Lab currently stores recent preview renders only in memory for the active screen session.
 - Real-device audio smoke testing is still required. Use `docs/voice-lab-smoke-test.md` and copy confirmed render results back into this inventory.
+- Initial headless emulator smoke test confirmed Kokoro preview/export on Android 15/API 35. Supertonic 2, Supertonic 3, and Soprano still require downloaded-model testing.
 
 ## Licensing Inventory
 
