@@ -73,7 +73,10 @@ When an Android emulator or physical device is attached, run the connected Voice
 scripts/check-voice-lab-connected.sh
 ```
 
-The connected gate runs only `VoiceLabSmokeTest`, which verifies that Voice Lab can be reached from the app shell and that the script, engine, voice, parameter, preview, render, and playback controls are addressable by stable test tags.
+The connected gate runs `VoiceLabSmokeTest` and `ModelsSmokeTest`.
+
+- `VoiceLabSmokeTest` verifies that Voice Lab can be reached from the app shell and that the script, engine, voice, parameter, preview, render, and playback controls are addressable by stable test tags.
+- `ModelsSmokeTest` verifies that the Models screen is reachable and that every known TTS model row exposes stable row/action hooks without starting downloads or deleting files.
 
 ## Current Validation State
 

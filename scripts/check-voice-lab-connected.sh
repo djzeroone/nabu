@@ -20,6 +20,6 @@ echo "JAVA_HOME=$JAVA_HOME"
 echo "ANDROID_HOME=$ANDROID_HOME"
 
 ./gradlew :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.mewmix.nabu.VoiceLabSmokeTest
+  -Pandroid.testInstrumentationRunnerArguments.class=com.mewmix.nabu.VoiceLabSmokeTest,com.mewmix.nabu.ModelsSmokeTest
 
 echo "Voice Lab connected smoke gate passed."

@@ -12,7 +12,10 @@ When an emulator or physical Android device is attached, run:
 scripts/check-voice-lab-connected.sh
 ```
 
-That connected gate runs `VoiceLabSmokeTest`, a focused Compose smoke test that verifies Voice Lab is reachable from the app shell and exposes stable automation tags for the script input, engine selector, voice selector, parameter controls, preview, full render, and playback controls.
+That connected gate runs focused Compose smoke tests:
+
+- `VoiceLabSmokeTest` verifies Voice Lab is reachable from the app shell and exposes stable automation tags for the script input, engine selector, voice selector, parameter controls, preview, full render, and playback controls.
+- `ModelsSmokeTest` verifies the Models screen is reachable and every known TTS model row exposes stable row/action hooks without starting downloads or deleting files.
 
 ## Device Setup
 
@@ -61,7 +64,7 @@ Then run one longer custom script with multiple paragraphs, at least one abbrevi
 
 Emulator smoke tests can validate initialization, render completion, generated WAV format, export path, model footprint, and relative generation speed. They do not replace real-device checks for audible quality, hardware playback, thermals, OEM storage behavior, or final creator-quality ratings.
 
-The connected Compose smoke test does not synthesize audio yet. It is a UI reachability and automation-hook check. Engine render/export validation remains a manual or supervised emulator step until the model-download flow also has stable automation hooks.
+The connected Compose smoke tests do not synthesize audio or start downloads yet. They are UI reachability and automation-hook checks. Engine render/export validation remains a manual or supervised emulator step until the model-download flow has an explicit, safe automation path.
 
 ## Results To Copy Into Inventory
 
