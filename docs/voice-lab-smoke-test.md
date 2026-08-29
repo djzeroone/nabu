@@ -142,3 +142,21 @@ Do not add subjective voice-quality ratings until a human evaluator supplies the
   - Supertonic 3 and Soprano synthesis, because this run stopped after a coordinate-only tap became ambiguous
 - Note:
   - A later coordinate-only attempt to start Supertonic 3 hit the wrong control in Models. App-private storage still contained Kokoro INT8 and Supertonic 2 afterward. Further downloadable-engine validation should use a safer UI automation hook, direct visible hierarchy parsing, or manual supervision.
+
+### 2026-08-29 Emulator: NabuVoiceLabApi35
+
+- Device: `sdk_gphone64_arm64`
+- Android: 15 / API 35
+- Connected smoke gate:
+  - initial run failed because tests assumed the bottom navigation `MORE` item was immediately visible
+  - tests were updated to seed first-run settings and launch `MainActivity` directly with `EXTRA_START_SCREEN`
+  - `scripts/check-voice-lab-connected.sh` passed after the fix
+- Coverage confirmed:
+  - `VoiceLabSmokeTest` passed
+  - `ModelsSmokeTest` passed
+  - Voice Lab screen is reachable and tagged controls are visible
+  - Models screen is reachable and known TTS model rows expose download/delete automation hooks
+- Quality gate:
+  - `scripts/check-voice-lab.sh` passed after the connected smoke-test fix
+- Remaining limitation:
+  - connected smoke tests still do not synthesize audio or start model downloads
