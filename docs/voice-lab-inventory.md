@@ -87,7 +87,7 @@ Nabu currently routes TTS through a small `TTSEngine` interface and `TTSManager`
 | Kokoro | zm_yunxi | kokoro-82m | speed, style vector | Bundled assets or Kokoro model download | same as Kokoro | Ready if Kokoro initializes |  |  |  |
 | Kokoro | zm_yunxia | kokoro-82m | speed, style vector | Bundled assets or Kokoro model download | same as Kokoro | Ready if Kokoro initializes |  |  |  |
 | Kokoro | zm_yunyang | kokoro-82m | speed, style vector | Bundled assets or Kokoro model download | same as Kokoro | Ready if Kokoro initializes |  |  |  |
-| Supertonic 2 | F1 | supertonic-2-onnx | speed, totalStep, language | Download required | exact size determined on device after download | Ready only when validator passes |  |  |  |
+| Supertonic 2 | F1 | supertonic-2-onnx | speed, totalStep, language | Download required unless already present in app model storage | 255 MB on API 35 emulator after download | Emulator preview/export passed on 2026-08-28; 17.61s audio generated in 1.237s, RTF about 0.070 |  |  | Technical validation only; audible quality not evaluated in headless emulator. |
 | Supertonic 2 | F2 | supertonic-2-onnx | speed, totalStep, language | Download required | exact size determined on device after download | Ready only when validator passes |  |  |  |
 | Supertonic 2 | F3 | supertonic-2-onnx | speed, totalStep, language | Download required | exact size determined on device after download | Ready only when validator passes |  |  |  |
 | Supertonic 2 | F4 | supertonic-2-onnx | speed, totalStep, language | Download required | exact size determined on device after download | Ready only when validator passes |  |  |  |
@@ -118,7 +118,7 @@ Nabu currently routes TTS through a small `TTSEngine` interface and `TTSManager`
 - Exact Supertonic model size is determined from downloaded files on-device because the current Nabu model allowlist stores bundle URLs, not byte-size metadata.
 - Voice Lab currently stores recent preview renders only in memory for the active screen session.
 - Real-device audio smoke testing is still required. Use `docs/voice-lab-smoke-test.md` and copy confirmed render results back into this inventory.
-- Initial headless emulator smoke test confirmed Kokoro preview/export on Android 15/API 35. Supertonic 2, Supertonic 3, and Soprano still require downloaded-model testing.
+- Initial headless emulator smoke test confirmed Kokoro preview/export on Android 15/API 35. A later headless emulator run confirmed Supertonic 2 download, preview, and WAV export. Supertonic 3 and Soprano still require downloaded-model testing.
 
 ## Licensing Inventory
 

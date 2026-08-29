@@ -6,7 +6,7 @@ This document records the current engineering health of the internal Voice Lab p
 
 ## Current Score
 
-Overall foundation health: 8.1 / 10
+Overall foundation health: 8.3 / 10
 
 Voice Lab is healthy for continued internal TTS evaluation. It is not yet a standalone Creator Voice Studio foundation.
 
@@ -16,7 +16,7 @@ Voice Lab is healthy for continued internal TTS evaluation. It is not yet a stan
 | Reuse of existing Nabu TTS paths | 8 | Kokoro, Supertonic, Soprano, playback, validation, and WAV export paths are reused instead of duplicated. |
 | Isolation | 8 | New prototype code is mostly under `voicelab` plus one screen and navigation hooks. |
 | Build health | 9 | `assembleDebug`, `testDebugUnitTest`, and `lintDebug` pass after the hardening pass. |
-| Runtime confidence | 6 | Kokoro has emulator smoke coverage. Supertonic 2, Supertonic 3, and Soprano still need downloaded-model device smoke tests. |
+| Runtime confidence | 6.8 | Kokoro and Supertonic 2 have emulator smoke coverage. Supertonic 3 and Soprano still need downloaded-model smoke tests. |
 | Automated coverage | 6 | Pure Voice Lab text/metric behavior is tested. Engine synthesis still depends on device/model smoke testing. |
 | Reusability for Creator Voice Studio | 7 | The adapter shape is useful, but UI state should move behind a ViewModel before productizing. |
 | Licensing clarity | 7 | Initial factual inventory exists. Human/legal review remains required before commercial distribution. |
@@ -35,6 +35,7 @@ Voice Lab is healthy for continued internal TTS evaluation. It is not yet a stan
 
 Passing checks:
 
+- `scripts/check-voice-lab.sh`
 - `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools ./gradlew :app:assembleDebug`
 - `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools ./gradlew :app:testDebugUnitTest`
 - `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools ./gradlew :app:lintDebug`
@@ -44,11 +45,25 @@ Known non-blocking warnings:
 - Kotlin compile still reports unrelated deprecations in existing app code, including one accessibility `isHeading` deprecation and several MediaPipe/Compose/API warnings.
 - Lint still reports warnings, but no lint errors.
 
+## No-Device Validation Boundary
+
+The current workspace can validate build health, unit behavior, lint, emulator install/navigation, Kokoro synthesis/export, model availability states, and WAV file structure.
+
+Without a real Android device, the workspace cannot validate:
+
+- audible voice quality
+- speaker hardware playback behavior
+- thermal behavior during repeated long renders
+- user-facing storage/export UX on physical OEM Android builds
+- final creator-quality ratings
+
+Downloaded-model emulator testing can still provide useful evidence for Supertonic 2, Supertonic 3, and Soprano initialization, render completion, export format, model footprint, and relative generation speed. Treat those results as technical evidence, not final voice-quality evidence.
+
 ## Remaining Risks
 
 | Risk | Severity | Recommended timing | Notes |
 | --- | --- | --- | --- |
-| Supertonic 2, Supertonic 3, and Soprano have not been smoke-tested with downloaded models | High | Before using Voice Lab results for product decisions | These engines remain the biggest unknown. |
+| Supertonic 3 and Soprano have not been smoke-tested with downloaded models | High | Before using Voice Lab results for product decisions | These engines remain the biggest unknown. |
 | Voice Lab UI owns render state directly | Medium | Before adding more comparison workflow complexity | Move to a ViewModel if the prototype grows. |
 | Engine synthesis paths are not covered by deterministic unit tests | Medium | After device smoke confirms target behavior | Add fakes or an engine adapter seam before extracting reusable components. |
 | Commercial licensing remains unresolved | High | Before any Creator Voice Studio extraction | OpenRAIL/Supertonic and GPL lineage require human/legal review. |
@@ -58,8 +73,8 @@ Known non-blocking warnings:
 
 Before expanding Voice Lab beyond internal engine evaluation:
 
-1. Download Supertonic 2, Supertonic 3, and Soprano models on a real device.
-2. Run the smoke checklist in `docs/voice-lab-smoke-test.md`.
-3. Record one render result per engine in `docs/voice-lab-inventory.md`.
-4. Re-run `assembleDebug`, `testDebugUnitTest`, and `lintDebug`.
+1. Run `scripts/check-voice-lab.sh`.
+2. Download Supertonic 3 and Soprano models on an emulator or real device.
+3. Run the smoke checklist in `docs/voice-lab-smoke-test.md`.
+4. Record one render result per engine in `docs/voice-lab-inventory.md`.
 5. Decide whether to keep Voice Lab behind a debug/internal gate.

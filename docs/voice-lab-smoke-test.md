@@ -4,6 +4,8 @@ Use this checklist for each device build before treating Voice Lab results as pr
 
 Current quality baseline and remaining risk notes are tracked in `docs/voice-lab-quality-baseline.md`.
 
+Run `scripts/check-voice-lab.sh` before using a build for smoke testing.
+
 ## Device Setup
 
 - Install the debug APK from `app/build/outputs/apk/debug/app-debug.apk`.
@@ -47,6 +49,10 @@ Use the default script first:
 
 Then run one longer custom script with multiple paragraphs, at least one abbreviation, and at least one number.
 
+## Emulator-Only Limits
+
+Emulator smoke tests can validate initialization, render completion, generated WAV format, export path, model footprint, and relative generation speed. They do not replace real-device checks for audible quality, hardware playback, thermals, OEM storage behavior, or final creator-quality ratings.
+
 ## Results To Copy Into Inventory
 
 After testing, update `docs/voice-lab-inventory.md` with:
@@ -89,3 +95,37 @@ Do not add subjective voice-quality ratings until a human evaluator supplies the
 - Not tested:
   - audible voice quality, because emulator was booted headless with `-no-audio`
   - Supertonic 2, Supertonic 3, and Soprano synthesis, because models were not downloaded
+
+### 2026-08-28 Emulator: NabuVoiceLabApi35
+
+- Device: `sdk_gphone64_arm64`
+- Android: 15 / API 35
+- Quality gate before smoke:
+  - `scripts/check-voice-lab.sh` passed
+- Install:
+  - current `app-debug.apk` installed successfully with `adb install -r`
+- Supertonic 2 download:
+  - started from Models screen
+  - completed through Nabu's `ModelDownloader`
+  - downloaded files included `duration_predictor.onnx`, `text_encoder.onnx`, `vector_estimator.onnx`, `vocoder.onnx`, `tts.json`, `unicode_indexer.json`, and 10 `voice_styles/*.json` files
+  - app-private model size after download: 255 MB for `files/models/supertonic-2-onnx`
+  - total app-private model storage after download: 343 MB
+- Supertonic 2 Voice Lab state:
+  - engine selector reported `Supertonic 2 TTS (Ready)`
+  - selected voice/style: `F1`
+  - visible controls: speed, steps, language
+- Supertonic 2 preview:
+  - input: default Voice Lab script
+  - log render time: 1,237 ms
+  - UI/audio duration: 17.61s
+  - calculated RTF: about 0.070
+  - playback started without crash in headless emulator
+- Export:
+  - exported file: `/sdcard/Music/VOICE_LAB_supertonic-2-onnx_F1_20260828_163425.wav`
+  - pulled file size: 1,552,972 bytes
+  - local file inspection: RIFF/WAVE, 16-bit mono PCM, 44,100 Hz
+- Not tested:
+  - audible voice quality, because emulator was booted headless with `-no-audio`
+  - Supertonic 3 and Soprano synthesis, because this run stopped after a coordinate-only tap became ambiguous
+- Note:
+  - A later coordinate-only attempt to start Supertonic 3 hit the wrong control in Models. App-private storage still contained Kokoro INT8 and Supertonic 2 afterward. Further downloadable-engine validation should use a safer UI automation hook, direct visible hierarchy parsing, or manual supervision.
