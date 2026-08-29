@@ -44,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.mewmix.nabu.ui.brutalist.BrutalButton
@@ -61,6 +62,7 @@ import com.mewmix.nabu.voicelab.VoiceLabRepository
 import com.mewmix.nabu.voicelab.VoiceLabRequest
 import com.mewmix.nabu.voicelab.VoiceLabSynthesisResult
 import com.mewmix.nabu.voicelab.VoiceLabText
+import com.mewmix.nabu.voicelab.VoiceLabTestTags
 import com.mewmix.nabu.voicelab.VoiceLabVoice
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -163,6 +165,7 @@ fun VoiceLabScreen() {
         title = "VOICE LAB",
         modifier = Modifier
             .fillMaxSize()
+            .testTag(VoiceLabTestTags.Screen)
             .padding(16.dp)
     ) {
         LazyColumn(
@@ -176,7 +179,9 @@ fun VoiceLabScreen() {
                     label = { Text("Script") },
                     minLines = 5,
                     maxLines = 10,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(VoiceLabTestTags.ScriptInput)
                 )
             }
 
@@ -196,6 +201,7 @@ fun VoiceLabScreen() {
                         modifier = Modifier
                             .menuAnchor()
                             .fillMaxWidth()
+                            .testTag(VoiceLabTestTags.EngineSelector)
                     )
                     DropdownMenu(
                         expanded = engineExpanded,
@@ -249,12 +255,14 @@ fun VoiceLabScreen() {
                 ) {
                     BrutalButton(
                         onClick = { render(VoiceLabText.previewText(script)) },
+                        modifier = Modifier.testTag(VoiceLabTestTags.PreviewButton),
                         enabled = !isRendering && selectedEngine?.isAvailable == true
                     ) {
                         Text(if (isRendering) "Rendering" else "Preview Voice")
                     }
                     BrutalButton(
                         onClick = { render(script) },
+                        modifier = Modifier.testTag(VoiceLabTestTags.RenderFullButton),
                         enabled = !isRendering && selectedEngine?.isAvailable == true
                     ) {
                         Text("Render Full Script")
@@ -298,7 +306,11 @@ fun VoiceLabScreen() {
 
             error?.let { message ->
                 item {
-                    Text(message, color = MaterialTheme.colorScheme.error)
+                    Text(
+                        text = message,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag(VoiceLabTestTags.Error)
+                    )
                 }
             }
 
@@ -310,7 +322,11 @@ fun VoiceLabScreen() {
 
             if (recentResults.isNotEmpty()) {
                 item {
-                    Text("Recent Renders", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Recent Renders",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.testTag(VoiceLabTestTags.RecentRenders)
+                    )
                 }
                 items(recentResults) { result ->
                     RecentRenderRow(
@@ -352,6 +368,7 @@ private fun VoiceSelector(
                 modifier = Modifier
                     .menuAnchor()
                     .fillMaxWidth()
+                    .testTag(VoiceLabTestTags.VoiceSelector)
             )
             DropdownMenu(
                 expanded = expanded,
@@ -384,7 +401,10 @@ private fun ParameterControls(
     values: MutableMap<String, String>,
     onReset: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier = Modifier.testTag(VoiceLabTestTags.ParameterControls),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -477,7 +497,10 @@ private fun PlaybackControls(
     onRestart: () -> Unit,
     onExport: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier = Modifier.testTag(VoiceLabTestTags.PlaybackControls),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Text(
             text = "Duration: ${
                 result?.audioDurationSeconds?.let { String.format(Locale.US, "%.2fs", it) } ?: "--"
@@ -518,6 +541,7 @@ private fun Diagnostics(result: VoiceLabSynthesisResult) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag(VoiceLabTestTags.Diagnostics)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
             .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
             .padding(12.dp),

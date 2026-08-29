@@ -6,6 +6,14 @@ Current quality baseline and remaining risk notes are tracked in `docs/voice-lab
 
 Run `scripts/check-voice-lab.sh` before using a build for smoke testing.
 
+When an emulator or physical Android device is attached, run:
+
+```bash
+scripts/check-voice-lab-connected.sh
+```
+
+That connected gate runs `VoiceLabSmokeTest`, a focused Compose smoke test that verifies Voice Lab is reachable from the app shell and exposes stable automation tags for the script input, engine selector, voice selector, parameter controls, preview, full render, and playback controls.
+
 ## Device Setup
 
 - Install the debug APK from `app/build/outputs/apk/debug/app-debug.apk`.
@@ -52,6 +60,8 @@ Then run one longer custom script with multiple paragraphs, at least one abbrevi
 ## Emulator-Only Limits
 
 Emulator smoke tests can validate initialization, render completion, generated WAV format, export path, model footprint, and relative generation speed. They do not replace real-device checks for audible quality, hardware playback, thermals, OEM storage behavior, or final creator-quality ratings.
+
+The connected Compose smoke test does not synthesize audio yet. It is a UI reachability and automation-hook check. Engine render/export validation remains a manual or supervised emulator step until the model-download flow also has stable automation hooks.
 
 ## Results To Copy Into Inventory
 
