@@ -14,7 +14,7 @@ scripts/check-voice-lab-connected.sh
 
 That connected gate runs focused Compose smoke tests:
 
-- `VoiceLabSmokeTest` verifies Voice Lab is reachable from the app shell and exposes stable automation tags for the script input, engine selector, voice selector, parameter controls, preview, full render, and playback controls.
+- `VoiceLabSmokeTest` verifies Voice Lab is reachable from the app shell and exposes stable automation tags for the script input, engine selector, voice selector, parameter controls, preview, full render, runtime diagnostics, and playback controls.
 - `ModelsSmokeTest` verifies the Models screen is reachable and every known TTS model row exposes stable row/action hooks without starting downloads or deleting files.
 
 ## Device Setup

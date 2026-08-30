@@ -85,5 +85,6 @@ The latest pushed validation notes are in:
 - `docs/voice-lab-quality-baseline.md`
 - `docs/voice-lab-smoke-test.md`
 - `docs/voice-lab-inventory.md`
+- `docs/voice-lab-runtime-diagnostics.md`
 
 At this checkpoint, the prototype builds, unit tests pass, lint passes, Kokoro has been smoke-tested, and Supertonic 2 has been emulator-tested through preview, playback/export path, and WAV file inspection.

@@ -1,5 +1,6 @@
 package com.mewmix.nabu.screens
 
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -60,6 +61,8 @@ import com.mewmix.nabu.voicelab.VoiceLabEngineInfo
 import com.mewmix.nabu.voicelab.VoiceLabParameter
 import com.mewmix.nabu.voicelab.VoiceLabRepository
 import com.mewmix.nabu.voicelab.VoiceLabRequest
+import com.mewmix.nabu.voicelab.VoiceLabRuntimeDiagnostics
+import com.mewmix.nabu.voicelab.VoiceLabRuntimeState
 import com.mewmix.nabu.voicelab.VoiceLabSynthesisResult
 import com.mewmix.nabu.voicelab.VoiceLabText
 import com.mewmix.nabu.voicelab.VoiceLabTestTags
@@ -92,6 +95,7 @@ fun VoiceLabScreen() {
     var playerState by remember { mutableStateOf(PlayerState.IDLE) }
     val player = remember { KokoroAudioPlayer(scope) { playerState = it } }
     var lastResult by remember { mutableStateOf<VoiceLabSynthesisResult?>(null) }
+    var runtimeDiagnostics by remember { mutableStateOf(VoiceLabRuntimeDiagnostics()) }
     val recentResults = remember { mutableStateListOf<VoiceLabSynthesisResult>() }
     val parameterValues = remember { mutableStateMapOf<String, String>() }
 
@@ -103,17 +107,43 @@ fun VoiceLabScreen() {
     }
 
     LaunchedEffect(Unit) {
+        runtimeDiagnostics = runtimeDiagnostics.copy(state = VoiceLabRuntimeState.Loading)
+        val startedAt = SystemClock.elapsedRealtime()
         val loaded = withContext(Dispatchers.IO) { repository.engines() }
+        val loadMs = SystemClock.elapsedRealtime() - startedAt
         engines = loaded
-        selectedEngineId = loaded.firstOrNull { it.isAvailable }?.id ?: loaded.firstOrNull()?.id
+        val nextEngineId = loaded.firstOrNull { it.isAvailable }?.id ?: loaded.firstOrNull()?.id
+        selectedEngineId = nextEngineId
+        val nextEngine = loaded.firstOrNull { it.id == nextEngineId }
+        runtimeDiagnostics = runtimeDiagnostics.copy(
+            state = nextEngine.runtimeState(),
+            engineCatalogLoadMs = loadMs,
+            selectedEngineId = nextEngineId,
+            lastFailure = null
+        )
     }
 
     val selectedEngine = engines.firstOrNull { it.id == selectedEngineId }
 
     LaunchedEffect(selectedEngineId) {
         val engineId = selectedEngineId ?: return@LaunchedEffect
-        voices = withContext(Dispatchers.IO) { repository.voices(engineId) }
-        selectedVoiceId = voices.firstOrNull()?.id
+        runtimeDiagnostics = runtimeDiagnostics.copy(
+            state = VoiceLabRuntimeState.Loading,
+            selectedEngineId = engineId,
+            lastFailure = null
+        )
+        val startedAt = SystemClock.elapsedRealtime()
+        val loadedVoices = withContext(Dispatchers.IO) { repository.voices(engineId) }
+        val loadMs = SystemClock.elapsedRealtime() - startedAt
+        voices = loadedVoices
+        val nextVoiceId = loadedVoices.firstOrNull()?.id
+        selectedVoiceId = nextVoiceId
+        runtimeDiagnostics = runtimeDiagnostics.copy(
+            state = selectedEngine.runtimeState(),
+            voiceListLoadMs = loadMs,
+            selectedEngineId = engineId,
+            selectedVoiceId = nextVoiceId
+        )
     }
 
     LaunchedEffect(selectedEngineId, selectedEngine?.parameters) {
@@ -128,14 +158,31 @@ fun VoiceLabScreen() {
         val renderText = VoiceLabText.renderableTextOrNull(text)
         if (renderText == null) {
             error = "Enter script text before rendering."
+            runtimeDiagnostics = runtimeDiagnostics.copy(
+                state = VoiceLabRuntimeState.Failed,
+                lastFailure = error
+            )
             return
         }
         if (!engine.isAvailable) {
             error = engine.status
+            runtimeDiagnostics = runtimeDiagnostics.copy(
+                state = engine.runtimeState(),
+                lastFailure = error
+            )
             return
         }
         isRendering = true
         error = null
+        val renderStartedAt = SystemClock.elapsedRealtime()
+        runtimeDiagnostics = runtimeDiagnostics.copy(
+            state = VoiceLabRuntimeState.Rendering,
+            selectedEngineId = engine.id,
+            selectedVoiceId = selectedVoiceId,
+            lastRenderRequestedAtMs = renderStartedAt,
+            lastRenderCompletedAtMs = null,
+            lastFailure = null
+        )
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
@@ -153,8 +200,17 @@ fun VoiceLabScreen() {
                 while (recentResults.size > 5) recentResults.removeAt(recentResults.lastIndex)
                 player.prepare(result.audio, result.sampleRate)
                 player.play()
+                runtimeDiagnostics = runtimeDiagnostics.copy(
+                    state = VoiceLabRuntimeState.Ready,
+                    lastRenderCompletedAtMs = SystemClock.elapsedRealtime()
+                )
             } catch (e: Exception) {
                 error = e.message ?: e.toString()
+                runtimeDiagnostics = runtimeDiagnostics.copy(
+                    state = VoiceLabRuntimeState.Failed,
+                    lastRenderCompletedAtMs = SystemClock.elapsedRealtime(),
+                    lastFailure = error
+                )
             } finally {
                 isRendering = false
             }
@@ -230,6 +286,7 @@ fun VoiceLabScreen() {
                     onExpandedChange = { voiceExpanded = it },
                     onSelected = {
                         selectedVoiceId = it
+                        runtimeDiagnostics = runtimeDiagnostics.copy(selectedVoiceId = it)
                         voiceExpanded = false
                     }
                 )
@@ -268,6 +325,10 @@ fun VoiceLabScreen() {
                         Text("Render Full Script")
                     }
                 }
+            }
+
+            item {
+                RuntimeDiagnostics(runtimeDiagnostics)
             }
 
             item {
@@ -339,6 +400,34 @@ fun VoiceLabScreen() {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun RuntimeDiagnostics(diagnostics: VoiceLabRuntimeDiagnostics) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(VoiceLabTestTags.RuntimeDiagnostics)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.32f), RoundedCornerShape(8.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text("Runtime", style = MaterialTheme.typography.titleMedium)
+        Text("State: ${diagnostics.state.name}")
+        Text("Engine catalog load: ${diagnostics.engineCatalogLoadMs?.let { "$it ms" } ?: "--"}")
+        Text("Voice list load: ${diagnostics.voiceListLoadMs?.let { "$it ms" } ?: "--"}")
+        Text("Selected engine: ${diagnostics.selectedEngineId ?: "--"}")
+        Text("Selected voice: ${diagnostics.selectedVoiceId ?: "--"}")
+        diagnostics.lastRenderRequestedAtMs?.let { requestedAt ->
+            val completedAt = diagnostics.lastRenderCompletedAtMs
+            val elapsedMs = (completedAt ?: SystemClock.elapsedRealtime()) - requestedAt
+            Text("Current/last render wall time: $elapsedMs ms")
+        }
+        diagnostics.lastFailure?.let {
+            Text("Last failure: $it", color = MaterialTheme.colorScheme.error)
         }
     }
 }
@@ -592,4 +681,13 @@ private fun VoiceLabParameter.defaultAsString(): String =
         is VoiceLabParameter.FloatValue -> defaultValue.toString()
         is VoiceLabParameter.IntValue -> defaultValue.toString()
         is VoiceLabParameter.ChoiceValue -> defaultValue
+    }
+
+private fun VoiceLabEngineInfo?.runtimeState(): VoiceLabRuntimeState =
+    when {
+        this == null -> VoiceLabRuntimeState.Unavailable
+        isAvailable -> VoiceLabRuntimeState.Ready
+        status.contains("download", ignoreCase = true) ||
+            status.contains("missing", ignoreCase = true) -> VoiceLabRuntimeState.NeedsModel
+        else -> VoiceLabRuntimeState.Unavailable
     }

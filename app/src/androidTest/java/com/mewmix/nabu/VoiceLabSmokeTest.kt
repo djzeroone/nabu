@@ -23,6 +23,7 @@ class VoiceLabSmokeTest {
             composeTestRule.onNodeWithTag(VoiceLabTestTags.ParameterControls).assertIsDisplayed()
             composeTestRule.onNodeWithTag(VoiceLabTestTags.PreviewButton).assertIsDisplayed()
             composeTestRule.onNodeWithTag(VoiceLabTestTags.RenderFullButton).assertIsDisplayed()
+            composeTestRule.onNodeWithTag(VoiceLabTestTags.RuntimeDiagnostics).assertIsDisplayed()
             composeTestRule.onNodeWithTag(VoiceLabTestTags.PlaybackControls).assertIsDisplayed()
         }
     }

@@ -56,6 +56,26 @@ data class VoiceLabRequest(
     val parameters: Map<String, String>,
 )
 
+enum class VoiceLabRuntimeState {
+    Loading,
+    Unavailable,
+    NeedsModel,
+    Ready,
+    Rendering,
+    Failed,
+}
+
+data class VoiceLabRuntimeDiagnostics(
+    val state: VoiceLabRuntimeState = VoiceLabRuntimeState.Loading,
+    val engineCatalogLoadMs: Long? = null,
+    val voiceListLoadMs: Long? = null,
+    val selectedEngineId: String? = null,
+    val selectedVoiceId: String? = null,
+    val lastRenderRequestedAtMs: Long? = null,
+    val lastRenderCompletedAtMs: Long? = null,
+    val lastFailure: String? = null,
+)
+
 data class VoiceLabSynthesisResult(
     val audio: FloatArray,
     val sampleRate: Int,
